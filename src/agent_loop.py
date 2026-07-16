@@ -966,11 +966,17 @@ _ADMIN_KEYWORDS = [
     "task", "tasks", "schedule", "cron", "setting", "settings", "preference",
     "configure", "config", "setup", "manage", "admin", "pipeline", "second opinion",
     "list models", "switch model", "change model", "theme", "create theme",
-    # Documents — "show/list/read my docs", "open my notes file", etc.
-    # Without these, manage_documents never reaches the prompt and the
-    # agent flails (curl, bash) instead of using the right tool.
-    "document", "documents", "doc", "docs", "library", "tidy",
-    "note", "notes", "todo", "todos", "reminder", "reminders",
+    # NOTE: content-tool keywords (note/todo/reminder/document/doc/library) were
+    # deliberately removed here. They are NOT admin operations, yet tripping
+    # _detect_admin_intent unions the ENTIRE _ADMIN_TOOLS set (manage_endpoints,
+    # manage_mcp, manage_webhooks, manage_tokens, manage_settings, …) into the
+    # turn's schema list. On local models that ~25-tool flood is catastrophic:
+    # measured qwen3:14b note-creation success collapsed to 5% (it omits the
+    # required `action` arg or refuses), vs 100% with only the relevant tools.
+    # manage_notes / manage_tasks / manage_calendar / manage_documents already
+    # reach the prompt via _DOMAIN_TOOL_MAP ("notes_calendar_tasks", "documents")
+    # and the RAG / keyword-hint tool selection, so these keywords were both
+    # redundant and harmful. See _DOMAIN_TOOL_MAP below.
 ]
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:

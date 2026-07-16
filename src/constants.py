@@ -105,7 +105,11 @@ CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
 PASSWORD_MIN_LENGTH = 8
 
 # Default parameters
-DEFAULT_TEMPERATURE = 1.0
+# Lowered from 1.0 for reliable local tool-calling: at temp 1.0 small local
+# models (qwen3:14b via Ollama /v1) refuse or mangle tool-call arguments
+# (~2/6 correct); at 0.2 they are reliable (6/6). This is an all-local
+# deployment, so there is no cloud-model warmth trade-off.
+DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_TOKENS = 0
 
 
