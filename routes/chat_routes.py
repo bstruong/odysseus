@@ -1098,16 +1098,20 @@ def setup_chat_routes(
         if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
             disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
-            # A direct lookup/search request should not drift into personal
-            # tools or shell fallbacks. It can only use web_search/web_fetch
-            # when the request's explicit web setting enabled them.
+            # A direct lookup/search request should not DRIFT into shell/curl,
+            # file, email, or personal-data fallbacks. But a request can be
+            # COMPOUND — "search the web for X and save it as a note / add it to
+            # my calendar / write it up as a document". The content-write tools
+            # (manage_notes/calendar/tasks, create/edit/update_document) are only
+            # ever surfaced by their OWN domain/RAG selection (e.g. the loop sees
+            # domains=['notes_calendar_tasks','web']), never for a pure lookup, so
+            # keeping them available fixes multi-step chains without letting a
+            # bare lookup drift. Only the genuine drift risks are stripped here.
             disabled_tools.update({
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",
                 "read_file", "write_file", "edit_file",
-                "create_document", "edit_document", "update_document",
                 "send_email", "reply_to_email",
-                "manage_notes", "manage_calendar", "manage_tasks",
                 "api_call",
             })
             if _search_enabled:
