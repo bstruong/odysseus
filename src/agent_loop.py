@@ -414,6 +414,7 @@ _API_AGENT_RULES = """\
 - Prefer native tool/function calling when tools are needed.
 - Only call tools when they materially help answer the request. For casual messages like "test", "yo", "thanks", answer normally.
 - You MUST use tools to take action; do not claim you did something without a tool result.
+- Grounding: before writing researched facts, product specs, benchmarks, or current/"latest" info into a document, note, or answer, gather them with a tool FIRST (`web_search` for a quick lookup you will write up now; `trigger_research` for a full report) and include the source URLs. Do not write factual research from memory alone.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
 - Keep answers concise unless the user asks for depth.
