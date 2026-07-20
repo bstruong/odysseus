@@ -176,3 +176,46 @@ UNVERIFIED (this section): fabrication event unresolved/not-reproduced (not "fix
 source-quality weak + ran on hermes3:8b; Compare + Documents editor never exercised; rates are
 small-sample (harness N<=6; web-off 1 timeout -> 5/6); web-off is a harness approximation of the
 app's gating.
+
+---
+
+## 6. EMAIL / CALENDAR INTEGRATION BLOCKERS  (2026-07-20; code-level, NO real creds touched)
+
+Priority use cases: multi-account Gmail, multi-calendar Google Calendar, web search, deep research.
+Checked read-only whether Google Calendar + Gmail are actually connectable before wiring real accounts.
+
+CALENDAR (Google Calendar) — NOT blocked; workable with setup friction.
+- Odysseus calendar is CalDAV-ONLY (no OAuth path; account creds = URL+username+password, stored
+  encrypted in prefs `caldav_accounts` LIST). Google CalDAV still works 2026: URL
+  `https://apidata.googleusercontent.com/caldav/v2/<email>/events` + App Password (requires 2FA on;
+  old google.com/calendar/dav is deprecated).
+- MULTI-ACCOUNT calendar: YES (caldav_accounts is a list; sync_caldav loops all accounts).
+- MULTI-CALENDAR within one Google account: code does principal->calendars() discovery (one
+  CalendarCal per calendar), BUT caldav_sync.py:186-202 ITSELF notes Google's principal->home-set
+  discovery "does not reliably enumerate calendars" and falls back to the single events URL. Practical
+  upshot: for Google you likely must add each calendar's CalDAV URL manually
+  (primary=/caldav/v2/<email>/events; secondary=/caldav/v2/<calendar_id>@group.calendar.google.com/events).
+
+GMAIL — NOT blocked; use IMAP App-Password (OAuth is NOT configured).
+- Auth: code supports BOTH Google OAuth (XOAUTH2) and IMAP/SMTP app-password. BUT OAuth is NOT set up:
+  GOOGLE_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are UNSET in .env AND the running container (verified) ->
+  the Sign-In flow 400s ("GOOGLE_OAUTH_CLIENT_ID not set — add it to .env", email_routes.py:5112).
+  => working path today = imap.gmail.com:993 / smtp.gmail.com:465 + 16-digit App Password (needs 2FA).
+- MULTI-ACCOUNT Gmail: YES (email_accounts table, per-account creds + is_default; pollers iterate .all()).
+
+AUTO-SEEDED SCHEDULER TASKS (11) — safe to connect; nothing auto-runs.
+- All SIX email/calendar tasks ship PAUSED (ship_paused=True) -> connecting Gmail/calendar triggers nothing.
+- draft_email_replies = SAFE: LLM-drafts replies, INSERTs into LOCAL email_ai_replies table for review;
+  NO SMTP send, nothing to sender (email_pollers.py:526).
+- extract_email_events = the ONE that takes real action: auto-creates calendar events (create_event ->
+  local + CalDAV write-back if a calendar is connected). Keep paused until trusted.
+- summarize_emails / check_email_urgency = read + LOCAL store (tags in local email_tags table, NOT Gmail
+  labels); can send digest/urgency-alert email to your OWN address only. email_auto_translate/classify_events
+  = local only. NO task sends to senders or mutates the Gmail server. IMAP +FLAGS (delete/read/answered)
+  are all USER-driven UI actions, not automations.
+- The 5 "active" tasks (tidy_sessions/documents/research, consolidate_memory, audit_skills) = internal
+  housekeeping on local data, event-triggered, never touch email/calendar.
+
+NEEDS REAL-CRED TEST (can't confirm from code): (1) Odysseus CalDAV sync/write-back vs Google specifically;
+(2) how many calendars Google's principal returns per account; (3) Gmail IMAP app-password end-to-end.
+COMMON STEP: enabling 2FA once covers BOTH Gmail IMAP app-password AND Google Calendar CalDAV app-password.
