@@ -131,3 +131,48 @@ Verified-not-assumed against the live repo/DB/git this session. Full detail live
   +271k is the initial import. WHY velocity is slowing was NOT investigated (interpretation, not data).
 - None of the audit/graph refactors have been done — analysis only. Confirm scope before any refactor.
 ```
+
+---
+
+## 5. REAL-USAGE EVALUATION  (2026-07-20; ran real tasks, not synthetic)
+
+Question: is Odysseus-on-qwen3:8b good enough for real usage? Ran three real tasks in the app
+(driven via UI; observed logs + real artifacts). No real email/calendar creds (deliberate).
+
+- **Drafting (recruiter-email reply) = GENUINE WIN.** Real 467-char draft, all asks, concise, did
+  NOT fabricate background (used "[Your Name]" placeholder). Send-ready with light edits.
+- **Research via agent (Intel Arc Pro B70 -> document) depends entirely on WEB GROUNDING, not the
+  model.** Web ON: accurate — but accuracy comes from the chat PRE-SEARCH injection, NOT model
+  memory; with the grounding directive it also cites 4 real, verified URLs. Web OFF: model
+  CONFABULATES a wholly wrong spec sheet (CUDA, 16GB, "2023") vs the real card (32GB/Battlemage/2026,
+  no CUDA). qwen3:8b does NOT actually know recent products.
+- **Deep Research feature = grounded but MEDIOCRE.** Real pipeline (5 rounds, 44 URLs, 26 cited
+  sources) but ran on hermes3:8b, ~7 min, weak source curation (cryptobriefing.com for inflation;
+  skipped bls.gov), meta-text leakage. Must-verify starting point only.
+- **Fabrication event (~11.5k tokens, prior session): NOT reproduced** (session reached 14.3k tokens,
+  create_document fired correctly both times). Left GENUINELY OPEN, not closed.
+- **Compare + Documents editor: NOT exercised** — unevaluated this session.
+
+CORRECTED OVERCLAIMS (honesty — the web-off test caught them): I first called the B70 doc "provably
+fabricated" (WRONG — specs+benchmarks are real 2026 data past my Jan-2026 cutoff), then "the model
+knew it from memory" (ALSO WRONG — web-off proves it doesn't; accuracy was pre-search). Truth:
+research accuracy rides on web-grounding; qwen3:8b's memory of recent things is unreliable.
+
+FIX DEPLOYED — commit `e6e7680` (pushed to fork): one base-rule bullet in `_API_AGENT_RULES`
+(src/agent_loop.py): before writing researched facts/specs/latest info into a document/note/answer,
+gather with a tool FIRST (web_search / trigger_research) and include source URLs. Verified: web-ON
+cited 4 real URLs; web-OFF N=6 -> 0/6 fabricated sources, 5/5 routed to trigger_research (no
+cite-washing). Its demonstrated effect is CITATIONS; grounding itself rides on pre-search (web on).
+
+VERDICT (specific): transform/draft content you GIVE it = reliably helpful (daily-use win);
+find/synthesize EXTERNAL facts = usable ONLY with web on (pre-search) or Deep Research — keep web ON
+for any research/"latest"/product-spec task.
+
+OPS: API tokens are Bearer "ody_" (bcrypt, api_tokens table) but gated to scope-aware API routes, not
+interactive chat (minted+deleted one during eval; chat driven via UI). Branch @ e6e7680 on
+fork=bstruong/odysseus; origin untouched.
+
+UNVERIFIED (this section): fabrication event unresolved/not-reproduced (not "fixed"); Deep Research
+source-quality weak + ran on hermes3:8b; Compare + Documents editor never exercised; rates are
+small-sample (harness N<=6; web-off 1 timeout -> 5/6); web-off is a harness approximation of the
+app's gating.
