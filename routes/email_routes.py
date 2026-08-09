@@ -4349,6 +4349,167 @@ def setup_email_routes():
             logger.error(f"cancel_agent_draft {sid!r} failed: {e}")
             return {"success": False, "error": "Mail operation failed"}
 
+    # ── Agent mutating-action confirm: list/approve/cancel ───────────────
+    # Same principle as the send-confirm block above, extended to the four
+    # non-send email tools that used to execute immediately against real
+    # IMAP with no confirmation gate: archive_email, delete_email,
+    # mark_email_read, bulk_email. When `agent_email_confirm` is on, the MCP
+    # email server (mcp_servers/email_server.py::_stash_pending_email_action)
+    # stages the request in pending_email_actions instead of touching IMAP.
+    # These endpoints run in the main app process (a separate process from
+    # the MCP server) and perform the actual mutation using the same IMAP
+    # helpers the human Archive/Delete/Mark-read buttons already use — the
+    # MCP server process never executes a gated action itself.
+    @router.get("/pending-actions")
+    async def list_pending_email_actions(owner: str = Depends(require_owner)):
+        import sqlite3
+        try:
+            conn = sqlite3.connect(SCHEDULED_DB)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, action, uid, uids, folder, permanent, read_flag,
+                          bulk_action, all_unread, description, account_id, created_at
+                   FROM pending_email_actions
+                   WHERE status = 'agent_pending' AND owner = ?
+                   ORDER BY created_at DESC""",
+                (owner or "",),
+            ).fetchall()
+            conn.close()
+            return {"pending": [dict(r) for r in rows]}
+        except Exception as e:
+            logger.error(f"list_pending_email_actions failed: {e}")
+            return {"pending": [], "error": "Mail operation failed"}
+
+    def _execute_pending_email_action(row: dict, owner: str) -> dict:
+        """Perform the real IMAP mutation for an approved pending action."""
+        action = row["action"]
+        folder = row["folder"] or "INBOX"
+        account_id = row["account_id"]
+        try:
+            if action == "archive":
+                with _imap(account_id, owner=owner) as conn:
+                    conn.select(_q(folder))
+                    if not _move_email_message(conn, row["uid"], "Archive", role="archive"):
+                        return {"success": False, "error": "Email not found"}
+                _email_index_delete(owner, account_id, folder, row["uid"])
+                _invalidate_list_cache(account_id)
+                return {"success": True}
+            if action == "delete":
+                permanent = bool(row["permanent"])
+                with _imap(account_id, owner=owner) as conn:
+                    conn.select(_q(folder))
+                    if permanent:
+                        if not _store_email_flag(conn, row["uid"], "\\Deleted", add=True):
+                            return {"success": False, "error": "Email not found"}
+                        conn.expunge()
+                    else:
+                        if not _move_email_message(conn, row["uid"], "Trash", role="trash"):
+                            return {"success": False, "error": "Email not found"}
+                _email_index_delete(owner, account_id, folder, row["uid"])
+                _invalidate_list_cache(account_id, folder)
+                return {"success": True}
+            if action == "mark_email_read":
+                read = bool(row["read_flag"])
+                with _imap(account_id, owner=owner) as conn:
+                    conn.select(_q(folder))
+                    if not _store_email_flag(conn, row["uid"], "\\Seen", add=read):
+                        return {"success": False, "error": "Email not found"}
+                _email_index_update_flags(owner, account_id, folder, row["uid"], "\\Seen", read)
+                _invalidate_list_cache(account_id)
+                return {"success": True}
+            if action == "bulk_email":
+                bulk_action = row["bulk_action"] or ""
+                permanent = bool(row["permanent"])
+                uids = json.loads(row["uids"]) if row["uids"] else []
+                changed = 0
+                with _imap(account_id, owner=owner) as conn:
+                    conn.select(_q(folder))
+                    if row["all_unread"]:
+                        st, data = conn.uid("SEARCH", None, "UNSEEN")
+                        if st == "OK" and data and data[0]:
+                            uids = [u.decode() if isinstance(u, bytes) else str(u) for u in data[0].split()]
+                    for uid in uids:
+                        ok = False
+                        if bulk_action == "mark_read":
+                            ok = _store_email_flag(conn, uid, "\\Seen", add=True)
+                        elif bulk_action == "mark_unread":
+                            ok = _store_email_flag(conn, uid, "\\Seen", add=False)
+                        elif bulk_action == "archive":
+                            ok = _move_email_message(conn, uid, "Archive", role="archive")
+                        elif bulk_action == "junk":
+                            ok = _move_email_message(conn, uid, "Junk", role="junk")
+                        elif bulk_action == "delete":
+                            if permanent:
+                                ok = _store_email_flag(conn, uid, "\\Deleted", add=True)
+                            else:
+                                ok = _move_email_message(conn, uid, "Trash", role="trash")
+                        if not ok:
+                            continue
+                        changed += 1
+                        if bulk_action in ("archive", "junk", "delete"):
+                            _email_index_delete(owner, account_id, folder, uid)
+                        else:
+                            _email_index_update_flags(owner, account_id, folder, uid, "\\Seen", bulk_action == "mark_read")
+                    if permanent and bulk_action == "delete":
+                        conn.expunge()
+                _invalidate_list_cache(account_id)
+                return {"success": True, "changed": changed, "requested": len(uids)}
+            return {"success": False, "error": f"Unknown pending action type: {action!r}"}
+        except Exception as e:
+            logger.error(f"Failed to execute pending email action {row.get('id')!r} ({action}): {e}")
+            return {"success": False, "error": "Mail operation failed"}
+
+    @router.post("/pending-actions/{aid}/approve")
+    async def approve_email_action(aid: str, owner: str = Depends(require_owner)):
+        import sqlite3
+        try:
+            conn = sqlite3.connect(SCHEDULED_DB)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM pending_email_actions WHERE id = ? AND status = 'agent_pending' AND owner = ?",
+                (aid, owner or ""),
+            ).fetchone()
+            conn.close()
+            if not row:
+                return {"success": False, "error": "Pending action not found or already handled"}
+            row = dict(row)
+        except Exception as e:
+            logger.error(f"approve_email_action {aid!r} lookup failed: {e}")
+            return {"success": False, "error": "Mail operation failed"}
+        result = _execute_pending_email_action(row, owner or "")
+        try:
+            new_status = "executed" if result.get("success") else "failed"
+            conn = sqlite3.connect(SCHEDULED_DB)
+            conn.execute(
+                "UPDATE pending_email_actions SET status = ?, result = ? WHERE id = ? AND owner = ?",
+                (new_status, json.dumps(result), aid, owner or ""),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"approve_email_action {aid!r} status update failed: {e}")
+        return result
+
+    @router.delete("/pending-actions/{aid}")
+    async def cancel_email_action(aid: str, owner: str = Depends(require_owner)):
+        import sqlite3
+        try:
+            conn = sqlite3.connect(SCHEDULED_DB)
+            cur = conn.execute(
+                """UPDATE pending_email_actions SET status = 'cancelled'
+                   WHERE id = ? AND status = 'agent_pending' AND owner = ?""",
+                (aid, owner or ""),
+            )
+            conn.commit()
+            affected = cur.rowcount
+            conn.close()
+            if not affected:
+                return {"success": False, "error": "Pending action not found or already handled"}
+            return {"success": True}
+        except Exception as e:
+            logger.error(f"cancel_email_action {aid!r} failed: {e}")
+            return {"success": False, "error": "Mail operation failed"}
+
     @router.get("/resolve-contact")
     async def resolve_contact(name: str = Query(..., description="Name to search for"), owner: str = Depends(require_owner)):
         """Search Sent folder for a contact by name. Returns matching email addresses."""

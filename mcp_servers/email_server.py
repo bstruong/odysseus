@@ -1516,6 +1516,91 @@ def _stash_agent_draft(*, to, subject, body, in_reply_to=None, references=None,
     }
 
 
+def _stash_pending_email_action(
+    action, *, uid=None, uids=None, folder="INBOX", permanent=False,
+    read=None, bulk_action=None, all_unread=False, account=None,
+    description="",
+) -> dict:
+    """Insert a mutating, non-send email action into pending_email_actions
+    instead of executing it. Mirrors _stash_agent_draft's send-confirm
+    pattern (#see _read_agent_email_confirm_setting) for archive_email,
+    delete_email, mark_email_read, and bulk_email — the four builtin email
+    tools that used to execute immediately against real IMAP with no
+    confirmation gate. The row sits with status='agent_pending' until a
+    human approves or cancels it via the /api/email/pending-actions
+    endpoints (routes/email_routes.py), which run in the main app process
+    and perform the actual IMAP mutation using the same helpers the human
+    "Archive"/"Delete"/"Mark read" buttons in the UI already use — this
+    MCP server process only ever stages the request, never executes it
+    while confirmation is required."""
+    try:
+        from src.constants import SCHEDULED_EMAILS_DB
+    except Exception:
+        return {"success": False, "error": "Pending-action storage unavailable"}
+    pending_id = uuid.uuid4().hex[:16]
+    now = datetime.utcnow().isoformat()
+    try:
+        conn = sqlite3.connect(SCHEDULED_EMAILS_DB)
+        # Touch the schema in case this is the first pending action ever
+        # staged (mirrors _stash_agent_draft's lazy CREATE TABLE IF NOT
+        # EXISTS — the MCP server can boot independently of email-routes
+        # init).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_email_actions (
+                id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                uid TEXT,
+                uids TEXT,
+                folder TEXT NOT NULL DEFAULT 'INBOX',
+                permanent INTEGER NOT NULL DEFAULT 0,
+                read_flag INTEGER,
+                bulk_action TEXT,
+                all_unread INTEGER NOT NULL DEFAULT 0,
+                description TEXT,
+                account_id TEXT,
+                owner TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'agent_pending',
+                result TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO pending_email_actions
+            (id, action, uid, uids, folder, permanent, read_flag, bulk_action,
+             all_unread, description, account_id, owner, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_pending')
+        """, (
+            pending_id,
+            action,
+            str(uid) if uid is not None else None,
+            json.dumps(list(uids)) if uids else None,
+            folder or "INBOX",
+            1 if permanent else 0,
+            None if read is None else (1 if read else 0),
+            bulk_action,
+            1 if all_unread else 0,
+            description or "",
+            account or None,
+            _current_owner(),
+            now,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return {"success": False, "error": f"Failed to stash pending action: {e}"}
+    return {
+        "success": True,
+        "pending": True,
+        "pending_id": pending_id,
+        "action": action,
+        "message": (
+            f"✋ {description} — staged for your approval, nothing has happened "
+            "yet.\nApprove or cancel it from the Pending Actions list in the "
+            "email panel, or tell me to cancel."
+        ),
+    }
+
+
 def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, bcc=None, account=None):
     """Send an email via SMTP. Returns dict with status.
 
@@ -2878,19 +2963,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             uid = arguments.get("uid")
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
-            ok = _archive_email(uid, arguments.get("folder", "INBOX"), account=acct)
+            folder = arguments.get("folder", "INBOX")
+            if _read_agent_email_confirm_setting():
+                staged = _stash_pending_email_action(
+                    "archive", uid=uid, folder=folder, account=acct,
+                    description=f"Archive UID {uid} in {folder}",
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _archive_email(uid, folder, account=acct)
             return [TextContent(type="text", text=f"{'Archived' if ok else 'Failed to archive'} UID {uid}")]
 
         elif name == "delete_email":
             uid = arguments.get("uid")
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
-            ok = _delete_email(
-                uid,
-                arguments.get("folder", "INBOX"),
-                permanent=bool(arguments.get("permanent", False)),
-                account=acct,
-            )
+            folder = arguments.get("folder", "INBOX")
+            permanent = bool(arguments.get("permanent", False))
+            if _read_agent_email_confirm_setting():
+                desc = f"{'Permanently delete' if permanent else 'Delete'} UID {uid} in {folder}"
+                if permanent:
+                    desc += " — THIS CANNOT BE UNDONE"
+                staged = _stash_pending_email_action(
+                    "delete", uid=uid, folder=folder, permanent=permanent, account=acct,
+                    description=desc,
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _delete_email(uid, folder, permanent=permanent, account=acct)
             return [TextContent(type="text", text=f"{'Deleted' if ok else 'Failed to delete'} UID {uid}")]
 
         elif name == "mark_email_read":
@@ -2898,8 +2996,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
             read = bool(arguments.get("read", True))
-            ok = _set_flag(uid, arguments.get("folder", "INBOX"), "\\Seen", add=read, account=acct)
+            folder = arguments.get("folder", "INBOX")
             state = "read" if read else "unread"
+            if _read_agent_email_confirm_setting():
+                staged = _stash_pending_email_action(
+                    "mark_email_read", uid=uid, folder=folder, read=read, account=acct,
+                    description=f"Mark UID {uid} in {folder} as {state}",
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _set_flag(uid, folder, "\\Seen", add=read, account=acct)
             return [TextContent(type="text", text=f"{'Marked' if ok else 'Failed to mark'} UID {uid} as {state}")]
 
         elif name == "bulk_email":
@@ -2907,6 +3012,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             folder = arguments.get("folder", "INBOX")
             all_unread = bool(arguments.get("all_unread", False))
             uids = arguments.get("uids") or []
+            permanent = bool(arguments.get("permanent", False))
+            if _read_agent_email_confirm_setting():
+                if not uids and not all_unread:
+                    return [TextContent(type="text", text="No messages selected (pass uids or all_unread=true).")]
+                if all_unread:
+                    target_desc = "all unread messages"
+                else:
+                    target_desc = f"{len(uids)} message(s)"
+                desc = f"Bulk {action or '(no action)'} {target_desc} in {folder}"
+                if action == "delete" and permanent:
+                    desc += " — PERMANENT, cannot be undone"
+                staged = _stash_pending_email_action(
+                    "bulk_email", uids=uids, folder=folder, permanent=permanent,
+                    bulk_action=action, all_unread=all_unread, account=acct,
+                    description=desc,
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
             if all_unread:
                 uids = _search_uids(folder, "UNSEEN", account=acct)
             if not uids:
