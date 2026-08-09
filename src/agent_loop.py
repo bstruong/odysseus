@@ -685,12 +685,23 @@ Notes, checklists, AND user reminders. Use this for "create/add/write a note", t
 Send a new email via SMTP. Use `resolve_contact` first if you only have a name. If multiple email accounts exist, call `list_email_accounts` first and pass the chosen `account`.
 
 CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `Thanks,` or similar — never type a person's name unless the user explicitly told you what to sign as. When `agent_email_confirm` is on (default), the tool returns `{pending: true, pending_id: ...}` and stages the email for the user to approve in the chat UI instead of SMTPing immediately.""",
+    "draft_email": """\
+```draft_email
+{"to": "recipient@example.com", "subject": "...", "body": "...", "account": "gmail"}
+```
+Create a NEW email as a reviewable Odysseus compose document — does NOT send. This is the default way to write an email for the user; prefer this over `send_email` unless they explicitly say to send now. The user reviews/edits and presses Send themselves.""",
     "list_emails": """\
 ```list_emails
 {"folder": "INBOX", "max_results": 20, "unread_only": false, "account": "gmail"}
 ```
 List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`.""",
     "read_email": "- ```read_email``` — Read a specific email by UID. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox.",
+    "search_emails": """\
+```search_emails
+{"query": "invoice from EY", "account": "gmail"}
+```
+Search for a specific email by sender, subject, or body content, across INBOX + Sent + Archive (not just the recent inbox slice `list_emails` returns). ALWAYS use this — not `list_emails` — whenever the user names a specific person, company, or topic to find ("the email from Sara Sotheby's", "that invoice from EY", "the last email about the property", "did I get anything from X about Y"). `list_emails` only returns a recent/unread slice and cannot filter by who or what — reaching for it instead of `search_emails` when the user named something specific will make you miss real matches and report false negatives. Returns matching emails with their UIDs for `read_email`/`reply_to_email`/`draft_email_reply`. If nothing matches, say so plainly — do not report an unrelated email as if it were the answer.""",
+    "download_attachment": "- ```download_attachment``` — Download an email attachment to local disk so you can read it. Args (JSON): {\"uid\": \"...\", \"index\": 0, \"folder\": \"INBOX\", \"account\": \"gmail\"}. `index` comes from `read_email`'s attachments list. Returns a local path; read it with `read_file`.",
     "reply_to_email": """\
 ```reply_to_email
 {"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
@@ -698,6 +709,14 @@ List recent emails from a folder, newest first, including read messages by defau
 SEND a reply email immediately by UID. Do not use this for "write/draft a reply", "open a reply", or "start a reply" — those should use `ui_control` with `open_email_reply <uid> <folder> reply <body>` (or structured `body`) to open the email draft document. Only use this when the user explicitly says to send now. Never invent UID `1`. Threads automatically (In-Reply-To/References handled).
 
 CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `Thanks,` or similar — never type a person's name unless the user explicitly told you what to sign as. When `agent_email_confirm` is on (default), the tool returns `{pending: true, pending_id: ...}` and stages the email for the user to approve in the chat UI instead of SMTPing immediately.""",
+    "draft_email_reply": """\
+```draft_email_reply
+{"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
+```
+Create a reply draft for an existing email UID as a reviewable Odysseus document — does NOT send. Use this, not `reply_to_email`, for normal "write/draft a reply saying X" requests — it's the safe default whenever the user hasn't explicitly said to send now. Threads automatically (In-Reply-To/References). Never invent UID 1; use the exact UID from `list_emails`/`search_emails`/`read_email`.
+
+CRITICAL — signatures: DO NOT invent a sign-off name; end with just `Thanks,` or similar unless told what to sign as.""",
+    "ai_draft_email_reply": "- ```ai_draft_email_reply``` — Generate an AI-written reply draft for an existing email UID (using Settings > Email > Writing Style) as a reviewable Odysseus document — does NOT send. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"reply_all\": false, \"account\": \"gmail\"}. Use when the user asks you to write/draft a reply WITHOUT dictating the exact body (vs. `draft_email_reply`, which takes body text they gave you). Never invent UID 1.",
     "bulk_email": """\
 ```bulk_email
 {"action": "delete", "uids": ["10997", "10998"], "folder": "INBOX", "account": "Gmail"}

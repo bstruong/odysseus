@@ -119,6 +119,11 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "delete_email": "Delete an email — moves to Trash by default, or expunges permanently with permanent=true.",
     "mark_email_read": "Mark an email as read or unread by toggling the \\Seen flag.",
     "bulk_email": "Perform one action on many emails at once. Use for delete all those, archive these, mark all read, move spam to junk. Takes explicit UIDs from list_emails or all_unread=true. Always pass account for Gmail/work/custom mailbox results.",
+    "search_emails": "Search emails by free-text query across INBOX, Sent, and Archive by default — not just the most recent inbox slice. Use when the user names a person or topic that may not be in the latest list_emails result (e.g. 'find the invoice from EY', 'last email about the property'). Returns matching emails with UIDs for read_email/reply_to_email.",
+    "draft_email": "Create a new Odysseus email compose draft document for the user to review — does NOT send. Default way to write a new email for the user; for replying to an existing email use draft_email_reply or ai_draft_email_reply instead.",
+    "draft_email_reply": "Create a threaded reply draft document for an existing email UID — does NOT send. Prefills recipient/subject and threads In-Reply-To/References. Use when the user says write/draft/open a reply and gives you the body text themselves, instead of reply_to_email (which sends immediately).",
+    "ai_draft_email_reply": "Generate an AI-written reply to an existing email UID using the configured Settings > Email > Writing Style, then open it as a review draft — does NOT send and does not save to the mailbox Drafts folder. Use when the user asks you to write/draft a reply without dictating the exact body themselves.",
+    "download_attachment": "Download an email attachment to local disk so it can be read with read_file. Needs the UID (from list_emails) and the attachment index (from read_email's attachments list).",
     "resolve_contact": "Look up a contact's email address by name. Searches CardDAV address book and sent email history. Use when the user says 'message [name]', 'email [name]', or 'send to [name]' without an email address.",
     "manage_contact": "Save / update / delete / list address-book contacts (CardDAV). Use for info about ANOTHER person — name, email, phone, postal address. Args: action=list|add|update|delete, name, email, phones, address, uid (from list). For 'save this for <person>' / address pastes / phone numbers next to a name, this is the right tool — NOT manage_memory. Do NOT use for facts about the USER ('my name is X'); those are manage_memory.",
     "manage_notes": "Create and manage notes and checklists (Google Keep-style). ALWAYS use this for note/todo/checklist/reminder creation — NEVER hit /api/notes via app_api. Accepts natural-language `due_date` like 'tomorrow at 9am' or '11pm today' (parsed in the USER'S timezone). The due_date IS the reminder — it fires a notification at that time, so do NOT also create a calendar event for the same reminder. Set colors, labels, pin, archive. Do NOT use manage_memory for note content.",
@@ -350,8 +355,26 @@ class ToolIndex:
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
         # believed it had only email tools and refused web/other tasks (#1707).
+        # NOTE 2: this is the ONLY place builtin email tools become reachable
+        # for an "email"-flavored query — index_mcp_tools() (see
+        # mcp_manager.get_tool_descriptions_for_prompt) skips ALL builtin MCP
+        # servers when building the semantic-retrieval embedding corpus
+        # ("they're already in the agent prompt"), so `retrieve()` never
+        # surfaces a builtin email tool by embedding similarity, ever. This
+        # set was previously missing search_emails, draft_email,
+        # draft_email_reply, ai_draft_email_reply, and download_attachment —
+        # meaning those 5 tools were unreachable by ANY query, not just
+        # atypically-phrased ones (confirmed live: 0 hits for "search_emails"
+        # across this deployment's full log history before the fix). Keep
+        # this set in sync with tool_security.BUILTIN_EMAIL_TOOLS and
+        # agent_loop.TOOL_SECTIONS — see
+        # tests/test_email_tool_sections_registry_sync.py and NOTES.md.
         frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
-            {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
+            {"list_email_accounts", "list_emails", "read_email", "search_emails", "send_email",
+             "reply_to_email", "draft_email", "draft_email_reply", "ai_draft_email_reply",
+             "bulk_email", "delete_email", "archive_email", "mark_email_read",
+             "download_attachment", "scan_email_unsubscribes", "unsubscribe_email",
+             "resolve_contact", "ui_control"},
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
