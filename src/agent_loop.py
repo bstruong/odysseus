@@ -1339,7 +1339,28 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
 
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
-    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
+    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email)\b"):
+        domains.add("email")
+    # Correspondence-inquiry phrasing: prompts about a specific message a
+    # person/company sent, with no literal "email"/"mail"/"inbox" anywhere
+    # (e.g. "Do I have anything from A3 Tech Group about a partnership for
+    # my saber project?"). Previously this only matched the literal, hardcoded
+    # "message chris|message him|message her" — three names lifted from one
+    # earlier repro, which moved the same keyword-gate failure to the next
+    # unanticipated phrasing/name instead of fixing the underlying gap. These
+    # patterns key on the correspondence *verbs/constructions* people actually
+    # use to ask about messages, not on literal email vocabulary or names.
+    if has(
+        r"\b(anything|something|any (?:word|update|news))\b[^.?!\n]{0,40}\bfrom\b",
+        r"\b(hear|heard)\b[^.?!\n]{0,25}\bfrom\b",
+        r"\breach(?:ed|ing)?\s+out\b",
+        r"\bcontact(?:ed|ing)?\s+(?:me|us)\b",
+        r"\bsent\s+(?:me|us)\s+(?:a|an|the|some|something|anything|word|info|information|details)\b",
+        r"\b(?:write|wrote)\s+(?:to\s+)?(?:me|us)\b",
+        r"\b(?:get|got)\s+(?:back\s+to\s+me|in\s+touch)\b",
+        r"\bfollow(?:ed|ing)?\s+up\s+(?:with|on)\b",
+        r"\bmessage(?:d)?\s+\w+\b",
+    ):
         domains.add("email")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
