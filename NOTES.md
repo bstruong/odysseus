@@ -422,3 +422,48 @@ committed, pushed, or upstreamed.
   or use `/search <query>`. An unchecked toggle in agent mode sends an explicit deny.
 - **VRAM budget** (RTX 3060 12GB): keep model + KV context under ~10,500 MiB total
   (desktop baseline ~800–900 MiB) to avoid Wayland compositor stutter.
+
+## Post-phase-2 bug: gemma4:e4b live answers stuck in the thinking box
+
+Found ad hoc (not a numbered session) debugging a real report: "I see the thinking
+process working, but the final result isn't being rendered" on gemma4:e4b chats.
+Confirmed via real `chat_messages` DB rows: the backend generated and saved
+correct final answers every time — this was a live-rendering-only bug, not a
+generation/backend bug (reloading the page/session already showed the correct
+persisted content; nothing prompts that during a live chat, though).
+
+Root cause: `static/js/chat.js`'s live-stream renderer has to guess where a
+model's non-tag-flagged reasoning ends and its real reply begins (used when
+reasoning arrives as literal `"Thinking Process:\n\n1. ..."` content instead of
+a structured `thinking`/`reasoning_content` delta — confirmed this happens for
+gemma4:e4b, non-deterministically). The old heuristic (`_replyPrefixes`) waited
+for a line starting with one of ~19 hardcoded conversational-opener words (Hey,
+Hi, Sure, Yes, OK, Here, ...). gemma4:e4b's actual reply openers in real usage —
+"The current price...", "Could you please...", "I apologize..." — matched none
+of them, so the boundary was never found and the ENTIRE response (reasoning +
+real answer) stayed collapsed in the thinking box forever.
+
+Fix: replaced the opener-word allowlist with a denylist-style structural check
+— once past a paragraph break, the first line that doesn't look like a
+continuation of numbered/structured reasoning (not `\d+\.`, not an indented
+sub-bullet, not a "Step N"/"Self-Correction" label) is treated as the reply
+boundary. Validated against the real captured "Could you please specify..."
+text (previously false, now correctly resolves) plus 3 other cases (prose
+reasoning regression check, mid-stream incomplete reasoning, a non-reasoning
+numbered final answer) via a standalone Node harness before deploying — a
+first draft of the indentation regex had its own bug (`^[-*]\s` doesn't match
+when there's leading whitespace before the bullet), caught by the same
+harness. No JS test suite exists in this repo to add a regression test to.
+
+**Caveat, stated plainly:** could not get a live-browser observation (no
+browser automation available this session) to prove this heuristic was the
+exact trigger for every instance the user saw — only that (a) it's a real,
+demonstrable bug on its own logic that reproduces exactly this symptom for at
+least one real captured case, and (b) it's now fixed for that case. If the
+symptom recurs after this fix, that points to a separate, not-yet-found cause
+(possibly a live-DOM/JS-exception issue that would need browser devtools to
+diagnose) rather than this same mechanism.
+
+`static/js/` is baked into the Docker image (like all source, unlike `data/`) —
+requires `docker compose build && up -d`, a plain restart does not pick it up
+(confirmed the hard way this session: first restart served the stale file).
