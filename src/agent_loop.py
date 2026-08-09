@@ -24,6 +24,7 @@ from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_security import BUILTIN_EMAIL_TOOLS as _TOOL_SECURITY_BUILTIN_EMAIL_TOOLS
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
@@ -501,7 +502,16 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    # Derived from tool_security.BUILTIN_EMAIL_TOOLS (the canonical MCP email
+    # tool registry) plus the two contact-lookup tools that round out the
+    # domain thematically. Deriving instead of hand-listing means this can't
+    # silently drift out of sync with BUILTIN_EMAIL_TOOLS again the way it
+    # did for search_emails/draft_email/draft_email_reply/ai_draft_email_reply
+    # /download_attachment (Phase 2 session 5 finding — this was the 5th
+    # confirmed instance of that gap; see NOTES.md). Also picks up
+    # scan_email_unsubscribes/unsubscribe_email automatically (added
+    # independently upstream) without needing a merge here.
+    "email": set(_TOOL_SECURITY_BUILTIN_EMAIL_TOOLS) | {"resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},

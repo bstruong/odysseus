@@ -242,6 +242,180 @@ including the pre-existing `agent_email_confirm` gate. Not committed/pushed/upst
   session to bake in the session-4 fix for live re-verification — the running
   container reflects the current working tree, not a stale build.
 
+## Phase 2 session 5 — cross-model benchmark (pure evaluation, no code changes)
+
+Ran the Step 4 cross-model benchmark: qwen3:8b (fresh baseline re-run) +
+gemma4:e4b, llama3.1:8b, granite4.1:8b, 13 tasks each (B1/B2 drafting, C1/C2/C3
+search, M1/M2 non-email builtin-tool tasks, D1 multi-tool chain), sequential
+VRAM loading (RTX 3060, `OLLAMA_MAX_LOADED_MODELS=1`). Headline: gemma4:e4b
+led on every axis (correctness, speed, VRAM); granite4.1:8b second (best
+quality on drafting, weak on one search task); qwen3:8b and llama3.1:8b tied
+on headline correctness but llama3.1:8b's failures were qualitatively worse
+(tool-syntax leakage into chat text, a fully fabricated fake tool-execution
+transcript). Full per-run detail and raw outputs were reported that session,
+not persisted to this repo.
+
+**Found a fifth location for the same recurring bug**, discovered live during
+the benchmark, not anticipated going in: `_DOMAIN_TOOL_MAP["email"]` in
+`src/agent_loop.py` (a fallback tool-availability list consulted when the NLP
+domain classifier tags a message "email" WITHOUT also matching a
+`_KEYWORD_HINTS` literal substring) was still missing the same 5 tools fixed
+everywhere else this phase. This fired identically for all 4 models on Task
+C2's neutral wording ("Do I have anything from A3 Tech Group..." — no
+"email"/"mail"/"reply" substring), silently withholding `search_emails` from
+every model that round regardless of which was running. C2 was excluded from
+session 5's clean comparison totals as a result. Not fixed that session
+(pure-evaluation scope) — carried forward as session 6's task.
+
+## Phase 2 session 6 — fifth _DOMAIN_TOOL_MAP fix + clean C2 re-run
+
+- `src/agent_loop.py` — `_DOMAIN_TOOL_MAP["email"]` now derived directly from
+  `tool_security.BUILTIN_EMAIL_TOOLS | {"resolve_contact", "manage_contact"}`
+  instead of a fifth hand-typed literal, so it structurally can't drift out of
+  sync with the canonical email-tool registry again. Verified programmatically
+  (not hand-typed-and-trusted): the derived set now contains all 14
+  `BUILTIN_EMAIL_TOOLS` names plus the 2 contact-lookup extras, 16 total.
+- Audited every other `_DOMAIN_TOOL_MAP` domain (web, documents, cookbook,
+  notes_calendar_tasks, ui, sessions, files, settings, contacts,
+  integrations) against `FUNCTION_TOOL_SCHEMAS` — none showed the "domain has
+  some of its own obvious tool family, missing others" staleness pattern the
+  email domain had. Two separate, different observations surfaced and are
+  flagged for a FUTURE session (not fixed, per this session's scope):
+  1. `generate_image` has no `FUNCTION_TOOL_SCHEMAS` entry at all — a sixth
+     instance of the *FUNCTION_TOOL_SCHEMAS*-completeness bug, in a different
+     domain (image generation) than the email one fixed repeatedly this
+     phase. Needs its own ground-truth diff against the image_gen MCP
+     server's real schema before fixing — not a trivial one-liner.
+  2. `ask_teacher`, `chat_with_model`, `edit_image`, `list_models`,
+     `manage_skills`, `pipeline`, `trigger_research` have NO
+     `_DOMAIN_TOOL_MAP` entry in ANY domain (rely purely on semantic RAG
+     retrieval with no keyword/domain-classifier fallback safety net at
+     all). This is a different, broader design question — whether these
+     tools need a fallback path and if so which domain — not a mechanical
+     diff-and-fix like the email case.
+- `tests/test_domain_tool_map_email_sync.py` — new targeted parity test,
+  same pattern as `test_email_tool_sections_registry_sync.py` and
+  `test_tool_index_schema_parity.py`, guarding this specific
+  registry/pair only (not the full 5-registry consolidation).
+- Full suite: 4589 passed, 3 skipped, 0 failed (baseline 4573 + 16 new tests).
+
+**Live re-verification (2 fresh runs x 4 models = 8 runs, real account,
+read-only, rebuilt container):** Task C2 ("Do I have anything from A3 Tech
+Group about a partnership for my saber project?") re-run across qwen3:8b,
+gemma4:e4b, llama3.1:8b, granite4.1:8b. All 8 runs: `search_emails` present
+in `selected_tools`/`tools_sent` (29, up from 24 pre-fix — a clean +5) AND
+called directly on round 1 by every model, zero fallback to `list_emails` or
+`resolve_contact`. All 8 answers correct. C2 is no longer confounded.
+
+Updated session 5 comparison with C2 folded in (13 task-instances/model now):
+  qwen3:8b 9/13 (69%), gemma4:e4b 12/13 (92%), llama3.1:8b 9/13 (69%),
+  granite4.1:8b 11/13 (85%). **Ranking unchanged** from session 5 — C2 was
+  uniformly perfect across all 4 models, so it narrowed each score by the
+  same +2/2 without reordering anyone. gemma4:e4b's lead was not an artifact
+  of the earlier C2 exclusion.
+
+Running fix count: 9 distinct fixes in this working tree (session 5's carried
+total of 8 + this session's `_DOMAIN_TOOL_MAP["email"]` fix), or 10 including
+the pre-existing `agent_email_confirm` gate. Still not committed, pushed, or
+upstreamed.
+
+## Phase 2 session 7 — validated default switched: qwen3:8b → gemma4:e4b
+
+**Current validated default model: `gemma4:e4b`.** Prior default was
+`qwen3:8b` (validated and documented in `HANDOFF.md`/`SYNC.md` — that
+historical evidence trail is left as-is, not rewritten). Basis for the
+switch: the session 5/6 cross-model benchmark (92% vs. 69% clean
+correctness across 13 task-instances/model, no confounded cells remaining
+after session 6's fix, faster generation, lower VRAM — see the session 5/6
+entries above for the full numbers).
+
+Switched in `data/settings.json` (gitignored, not in git — this is the
+actual mechanism `resolve_endpoint()` reads, confirmed via the same method
+`HANDOFF.md`/`SYNC.md` used to originally verify qwen3:8b: `resolve_endpoint
+("default")` now returns `gemma4:e4b`): `default_model` AND `research_model`
+(both were `qwen3:8b`, same `a3c5a269` Ollama endpoint, unchanged). No
+Docker Compose env var, no hardcoded source-code fallback string, and no
+`ModelEndpoint`-level default flag exist anywhere else — `supports_tools=1`
+is endpoint-wide (applies to all 4 models via the single Ollama endpoint,
+confirmed since session 4), so it needed no change. `LLAMA_ARG_FIT_TARGET=
+4096` is a systemd `ollama.service`-level env var, confirmed generic
+(applies regardless of which model is loaded), not model-specific.
+
+Verified post-switch: `resolve_endpoint("default")` and `resolve_endpoint
+("research")` both return `gemma4:e4b`; a live read-only smoke test
+("Search my email for saber.") against the real account completed
+correctly end-to-end (`search_emails` called natively, real results,
+exit_code=0), with every log line confirming `model=gemma4:e4b` and zero
+`qwen3:8b` references anywhere in that request's processing. `qwen3:8b`
+remains installed locally (not removed) for any future confirmatory
+re-check.
+
+Running fix/change count: 10 distinct changes in this working tree
+(session 6's carried total of 9 + this session's default-model switch), or
+11 including the pre-existing `agent_email_confirm` gate. Still not
+committed, pushed, or upstreamed.
+
+## Phase 2 session 8 — model cleanup: qwen3:8b, llama3.1:8b, granite4.1:8b removed
+
+Benchmark (sessions 5-6) and default switch (session 7) concluded and
+verified; the 3 non-default models had no further role, so they were
+removed from Ollama to reclaim disk (~15.4 GB: qwen3:8b 5.2GB +
+llama3.1:8b 4.9GB + granite4.1:8b 5.3GB). Only `gemma4:e4b` (9.6GB)
+remains installed. This REVERSES session 7's "keep qwen3:8b installed as
+a fallback" — an intentional decision this session, not a reopening of
+that call. Historical results for all 3 stay fully documented in the
+session 5/6 NOTES.md entries and `HANDOFF.md`/`SYNC.md` — the model
+weights themselves weren't needed to preserve that evidence.
+
+Confirmed before deleting: nothing else depended on them —
+`default_model`/`research_model` were already `gemma4:e4b` (session 7,
+reconfirmed unchanged), the single `ModelEndpoint` row's `cached_models`
+is a non-authoritative UI-display snapshot only (`resolve_endpoint()`
+never consults it when the configured model is already set and not
+hidden — confirmed by reading the code, not assumed), and no other
+config/source-code location references any of the 3 as a live default.
+Refreshed `cached_models` to `["gemma4:e4b"]` after deletion anyway, for
+UI hygiene (prevents ghost entries in the model picker) — not required
+for correctness, done as a natural follow-through.
+
+Post-cleanup live smoke test (real account, read-only, same "Search my
+email for saber." prompt used throughout this phase): clean end-to-end
+success, `search_emails` fired natively, exit_code=0, correct results,
+`model=gemma4:e4b` throughout, zero errors or stale references to any of
+the 3 removed models anywhere in the logs.
+
+Running fix/change count: 11 distinct changes in this working tree
+(session 7's carried total of 10 + this session's model cleanup), or 12
+including the pre-existing `agent_email_confirm` gate. Still not
+committed, pushed, or upstreamed.
+
+### Starting context for session 9 (do not re-derive)
+
+- **Only `gemma4:e4b` is installed in Ollama now.** qwen3:8b, llama3.1:8b,
+  and granite4.1:8b were intentionally removed session 8 — their full
+  historical results live in the session 5/6 NOTES.md entries and
+  `HANDOFF.md`/`SYNC.md`, not in the weights. A future session needing to
+  re-test one of them must re-pull it first (tags: `qwen3:8b`,
+  `llama3.1:8b`, `granite4.1:8b` — all previously confirmed available and
+  working, see session 5's Step 0).
+- **Validated default remains `gemma4:e4b`** (`default_model` and
+  `research_model` both, session 7) — unaffected by the cleanup, reverified
+  clean post-deletion.
+- **All 5 known tool-availability registries are still in sync** for the 5
+  email tools: `TOOL_SECTIONS`, `_KEYWORD_HINTS`, `FUNCTION_TOOL_SCHEMAS`,
+  `BUILTIN_TOOL_DESCRIPTIONS`, `_DOMAIN_TOOL_MAP["email"]`. Five independent
+  hand-maintained lists needing to agree is still the systemic risk — full
+  consolidation into fewer sources of truth remains explicitly not done.
+- **Two deferred leads from session 6's audit, still not investigated:**
+  `generate_image` missing from `FUNCTION_TOOL_SCHEMAS` (6th instance of
+  that bug, different domain); 7 tools with no `_DOMAIN_TOOL_MAP` fallback
+  at all (different, broader design question).
+- **Working tree**: 11 distinct changes (12 with the confirm gate), still
+  mixed, still uncommitted, not split into PRs. Container was restarted
+  (not rebuilt) this session to clear caches after the model cleanup.
+- Berserker archive confirmed present at `/home/brian/Projects/berserker` as
+  of session 5 — no need to re-check unless something changes.
+
 ## Operational notes
 
 - **Web search is per-turn opt-in.** Enable the composer web toggle (visibly active)

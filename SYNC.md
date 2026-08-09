@@ -28,7 +28,12 @@ Verified-not-assumed against the live repo/DB/git this session. Full detail live
   Endpoint row (data/app.db): id=a3c5a269, supports_tools=1, is_enabled=1.
 - `OLLAMA_CONTEXT_LENGTH=16384` set (host systemd override; verified). Required — /v1 path sends no
   num_ctx; multi-round compound prompts hit 8–13k tokens and truncate at Ollama's ~4096 default.
-- DEFAULT MODEL = **qwen3:8b** (settings.json; verified resolve_endpoint("default") -> qwen3:8b).
+- DEFAULT MODEL = **gemma4:e4b** (settings.json `default_model`/`research_model`; verified
+  `resolve_endpoint("default")` -> gemma4:e4b). Switched from qwen3:8b (this doc's original default,
+  see MODEL RESULTS below) in Phase 2 session 7, based on a cross-model benchmark (sessions 5-6:
+  92% vs. 69% clean correctness across 13 task-instances, faster, lower VRAM) — see NOTES.md for the
+  full evidence trail. qwen3:8b, llama3.1:8b, and granite4.1:8b (the other benchmark candidates) were
+  removed from Ollama in session 8; only gemma4:e4b remains installed.
 - The four fixes that made native tool-calling work on local models:
   1. supports_tools=1 (data/app.db, not git) — else tools_sent=0. Re-apply via
      scripts/set_ollama_supports_tools.py after any data-volume reset.
