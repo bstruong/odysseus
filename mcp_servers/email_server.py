@@ -58,6 +58,18 @@ def _uid_fetch_rows(data) -> list:
 
 _ACCOUNT_CACHE: dict = {}  # key = normalized account selector -> config dict
 _MCP_OWNER_ARG = "_odysseus_owner"
+# list_emails' plain "recent inbox slice" default (20, unchanged) is fine for
+# a bare listing request, but it silently applied to unread_only/unresponded_only
+# too — an "attention" query with no way to page past it, so a caller (model or
+# human) that never thinks to raise max_results only ever sees the newest 20 of
+# however many actually need attention, a different subset each time as new
+# mail arrives ahead of the cutoff. Confirmed live: 58 real unread on this
+# account, `list_emails(unread_only=True)` with no max_results returned exactly
+# 20. Root-caused as (part of) the Task A triage coverage gap — qwen3:8b never
+# passed max_results, so it never saw more than this default either. Raised
+# only for attention-filtered queries, not the general default, so a plain
+# "show me my inbox" doesn't start dumping hundreds of read messages.
+_ATTENTION_QUERY_MAX_RESULTS = 200
 _CURRENT_OWNER: ContextVar[str | None] = ContextVar("email_mcp_owner", default=None)
 _OWNER_ENV_KEYS = ("ODYSSEUS_MCP_EMAIL_OWNER", "ODYSSEUS_EMAIL_OWNER")
 _OWNER_SCOPE_ERROR = (
@@ -2268,7 +2280,10 @@ async def list_tools() -> list[Tool]:
             description=(
                 "List unread or unresponded emails from the inbox. "
                 "Returns subject, sender, date, and cached AI summary for each. "
-                "Use this to check what emails need attention. "
+                "Use this to check what emails need attention — with unread_only "
+                "or unresponded_only set, this is NOT capped at 20; it returns up "
+                "to 200 so a busy inbox doesn't silently hide older unread mail. "
+                "Without either filter, returns the most recent 20 by default. "
                 "Pass `account` to scan a non-default mailbox."
             ),
             inputSchema={
@@ -2653,9 +2668,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         acct = arguments.get("account")  # consumed by all email ops
 
         if name == "list_emails":
-            max_results = arguments.get("max_results", arguments.get("limit", 20))
             unresponded_only = arguments.get("unresponded_only", False)
             unread_only = arguments.get("unread_only", False)
+            _explicit_max_results = arguments.get("max_results", arguments.get("limit"))
+            if _explicit_max_results is not None:
+                max_results = _explicit_max_results
+            elif unread_only or unresponded_only:
+                max_results = _ATTENTION_QUERY_MAX_RESULTS
+            else:
+                max_results = 20
             # Build a header note so the LLM always knows which account was hit
             # AND what other accounts exist. Prevents "I can see emails" →
             # user: "I have 2 inboxes" → "which one?" loop.

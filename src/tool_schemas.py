@@ -1128,7 +1128,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_emails",
-            "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false.",
+            "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false. For triage/'what needs attention' requests, set unread_only=true (or unresponded_only=true) and omit max_results — that returns up to 200, not the plain-listing default of 20.",
             "parameters": {
                 "type": "object",
                 "properties": {

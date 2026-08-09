@@ -694,7 +694,7 @@ Create a NEW email as a reviewable Odysseus compose document — does NOT send. 
 ```list_emails
 {"folder": "INBOX", "max_results": 20, "unread_only": false, "account": "gmail"}
 ```
-List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`.""",
+List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`. For "what needs my attention" / triage requests, call with `unread_only: true` (or `unresponded_only: true`) and no `max_results` — this returns up to 200, not the plain-listing default of 20, so a busy inbox isn't silently truncated to whichever 20 happen to be newest.""",
     "read_email": "- ```read_email``` — Read a specific email by UID. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox.",
     "search_emails": """\
 ```search_emails
