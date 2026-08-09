@@ -1139,6 +1139,12 @@ FUNCTION_TOOL_SCHEMAS = [
                     "unresponded_only": {"type": "boolean", "description": "Only show unanswered emails. Default false."},
                     "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, e.g. Gmail or user@example.com"},
                 },
+                # Kept in sync with mcp_servers/email_server.py's list_emails
+                # inputSchema, which is the schema actually enforced (via the
+                # MCP SDK's jsonschema.validate on every call). Without this,
+                # a model that invented a `query` argument here to smuggle
+                # search intent into list_emails got it silently accepted.
+                "additionalProperties": False,
             }
         }
     },

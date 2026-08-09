@@ -2239,6 +2239,20 @@ async def list_tools() -> list[Tool]:
                            "Omit to use the default account. Use list_email_accounts to discover available accounts.",
         },
     }
+    # Caller identity, injected by tool_execution.py/agent_loop.py before every
+    # real dispatch (see _MCP_OWNER_ARG) — never model-supplied. Any schema
+    # that adds "additionalProperties": false must declare this too, or every
+    # real call (which always carries it once an owner is authenticated) gets
+    # rejected right alongside the invalid arguments the strictness was meant
+    # to catch. Confirmed live: turning on additionalProperties:false for
+    # list_emails without this broke 100% of calls, not just the invented-arg
+    # ones, until this was added.
+    OWNER_PROP = {
+        _MCP_OWNER_ARG: {
+            "type": "string",
+            "description": "Internal: caller identity injected by the agent runtime. Do not set this.",
+        },
+    }
     return [
         Tool(
             name="list_email_accounts",
@@ -2270,6 +2284,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of emails to return (default: 20)",
                         "default": 20,
                     },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Backward-compatible alias for max_results.",
+                    },
                     "unresponded_only": {
                         "type": "boolean",
                         "description": "Only show emails without replies (default: false)",
@@ -2281,8 +2299,19 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                     **ACCOUNT_PROP,
+                    **OWNER_PROP,
                 },
                 "required": [],
+                # Was missing: a model that invents an out-of-schema argument
+                # (e.g. `query`, attempting to smuggle search intent into this
+                # tool) got the extra key silently accepted and ignored rather
+                # than rejected — masking a real tool-choice failure as a
+                # "successful" call that happened to work by luck of falling
+                # inside the default recency window. `limit` is declared above
+                # specifically so this doesn't also reject the one alias the
+                # handler (`arguments.get("max_results", arguments.get("limit", 20))`)
+                # actually supports.
+                "additionalProperties": False,
             },
         ),
         Tool(
