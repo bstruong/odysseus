@@ -93,7 +93,9 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
 class LLMConfig:
     """Configuration constants for LLM operations."""
     DEFAULT_TIMEOUT = 30
-    DEFAULT_TEMPERATURE = 1.0
+    # See src.constants.DEFAULT_TEMPERATURE — lowered to 0.2 for reliable
+    # local tool-calling (all-local deployment).
+    DEFAULT_TEMPERATURE = 0.2
     DEFAULT_MAX_TOKENS = 0
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
@@ -1497,6 +1499,31 @@ def _is_untrusted_context_content(content) -> bool:
     return False
 
 
+def _is_ephemeral_context_content(content) -> bool:
+    """Turn-scoped context prepended as its own user turn (e.g. the current
+    date/time block from src.user_time).
+
+    These are injected as a separate user message right before the real user
+    request. If the consecutive-user-message merge below folds them INTO the
+    request, the actual ask ends up buried under ~750 chars of date/calendar/
+    task boilerplate, and small local models (qwen3:14b via Ollama /v1) read
+    the blob as a scheduling-context dump and refuse the tool call outright
+    ("no function available…") — reproducibly. Keeping the context a separate
+    turn (with the same assistant boundary used for untrusted context) restores
+    reliable tool calling.
+    """
+    if isinstance(content, str):
+        return "current date/time, refreshed each turn" in content[:120]
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and _is_ephemeral_context_content(block.get("text") or "")
+            for block in content
+        )
+    return False
+
+
 _REFERENCE_CONTEXT_BOUNDARY = "Reference context received."
 
 
@@ -1612,7 +1639,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
 
         last = merged[-1]
         if last.get("role") == "user" and item.get("role") == "user":
-            if _is_untrusted_context_content(last.get("content")):
+            if _is_untrusted_context_content(last.get("content")) or _is_ephemeral_context_content(last.get("content")):
                 merged.append({"role": "assistant", "content": _REFERENCE_CONTEXT_BOUNDARY})
                 merged.append(item)
                 continue

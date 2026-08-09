@@ -150,9 +150,9 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "send_email", "reply_to_email", "bulk_email", "delete_email",
     "archive_email", "mark_email_read", "unsubscribe_email",
     # The draft tools create documents and download_attachment writes to
-    # disk — mutating. They have no native schemas (yet), so without these
-    # static entries plan-mode safety for their bare fence tags would depend
-    # entirely on the MCP read-only inventory being present and current.
+    # disk — mutating. As of Phase 2 session 4 they DO have FUNCTION_TOOL_SCHEMAS
+    # entries, but keep the static backstop anyway: plan-mode safety shouldn't
+    # depend entirely on that list staying complete and importable.
     "draft_email", "draft_email_reply", "ai_draft_email_reply",
     "download_attachment",
     "download_model", "serve_model",

@@ -24,6 +24,7 @@ from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_security import BUILTIN_EMAIL_TOOLS as _TOOL_SECURITY_BUILTIN_EMAIL_TOOLS
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
@@ -414,6 +415,7 @@ _API_AGENT_RULES = """\
 - Prefer native tool/function calling when tools are needed.
 - Only call tools when they materially help answer the request. For casual messages like "test", "yo", "thanks", answer normally.
 - You MUST use tools to take action; do not claim you did something without a tool result.
+- Grounding: before writing researched facts, product specs, benchmarks, or current/"latest" info into a document, note, or answer, gather them with a tool FIRST (`web_search` for a quick lookup you will write up now; `trigger_research` for a full report) and include the source URLs. Do not write factual research from memory alone.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
 - Keep answers concise unless the user asks for depth.
@@ -500,7 +502,16 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    # Derived from tool_security.BUILTIN_EMAIL_TOOLS (the canonical MCP email
+    # tool registry) plus the two contact-lookup tools that round out the
+    # domain thematically. Deriving instead of hand-listing means this can't
+    # silently drift out of sync with BUILTIN_EMAIL_TOOLS again the way it
+    # did for search_emails/draft_email/draft_email_reply/ai_draft_email_reply
+    # /download_attachment (Phase 2 session 5 finding — this was the 5th
+    # confirmed instance of that gap; see NOTES.md). Also picks up
+    # scan_email_unsubscribes/unsubscribe_email automatically (added
+    # independently upstream) without needing a merge here.
+    "email": set(_TOOL_SECURITY_BUILTIN_EMAIL_TOOLS) | {"resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -684,12 +695,23 @@ Notes, checklists, AND user reminders. Use this for "create/add/write a note", t
 Send a new email via SMTP. Use `resolve_contact` first if you only have a name. If multiple email accounts exist, call `list_email_accounts` first and pass the chosen `account`.
 
 CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `Thanks,` or similar — never type a person's name unless the user explicitly told you what to sign as. When `agent_email_confirm` is on (default), the tool returns `{pending: true, pending_id: ...}` and stages the email for the user to approve in the chat UI instead of SMTPing immediately.""",
+    "draft_email": """\
+```draft_email
+{"to": "recipient@example.com", "subject": "...", "body": "...", "account": "gmail"}
+```
+Create a NEW email as a reviewable Odysseus compose document — does NOT send. This is the default way to write an email for the user; prefer this over `send_email` unless they explicitly say to send now. The user reviews/edits and presses Send themselves.""",
     "list_emails": """\
 ```list_emails
 {"folder": "INBOX", "max_results": 20, "unread_only": false, "account": "gmail"}
 ```
-List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`.""",
+List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`. For "what needs my attention" / triage requests, call with `unread_only: true` (or `unresponded_only: true`) and no `max_results` — this returns up to 200, not the plain-listing default of 20, so a busy inbox isn't silently truncated to whichever 20 happen to be newest.""",
     "read_email": "- ```read_email``` — Read a specific email by UID. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox.",
+    "search_emails": """\
+```search_emails
+{"query": "invoice from EY", "account": "gmail"}
+```
+Search for a specific email by sender, subject, or body content, across INBOX + Sent + Archive (not just the recent inbox slice `list_emails` returns). ALWAYS use this — not `list_emails` — whenever the user names a specific person, company, or topic to find ("the email from Sara Sotheby's", "that invoice from EY", "the last email about the property", "did I get anything from X about Y"). `list_emails` only returns a recent/unread slice and cannot filter by who or what — reaching for it instead of `search_emails` when the user named something specific will make you miss real matches and report false negatives. Returns matching emails with their UIDs for `read_email`/`reply_to_email`/`draft_email_reply`. If nothing matches, say so plainly — do not report an unrelated email as if it were the answer.""",
+    "download_attachment": "- ```download_attachment``` — Download an email attachment to local disk so you can read it. Args (JSON): {\"uid\": \"...\", \"index\": 0, \"folder\": \"INBOX\", \"account\": \"gmail\"}. `index` comes from `read_email`'s attachments list. Returns a local path; read it with `read_file`.",
     "reply_to_email": """\
 ```reply_to_email
 {"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
@@ -697,14 +719,24 @@ List recent emails from a folder, newest first, including read messages by defau
 SEND a reply email immediately by UID. Do not use this for "write/draft a reply", "open a reply", or "start a reply" — those should use `ui_control` with `open_email_reply <uid> <folder> reply <body>` (or structured `body`) to open the email draft document. Only use this when the user explicitly says to send now. Never invent UID `1`. Threads automatically (In-Reply-To/References handled).
 
 CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `Thanks,` or similar — never type a person's name unless the user explicitly told you what to sign as. When `agent_email_confirm` is on (default), the tool returns `{pending: true, pending_id: ...}` and stages the email for the user to approve in the chat UI instead of SMTPing immediately.""",
+    "draft_email_reply": """\
+```draft_email_reply
+{"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
+```
+Create a reply draft for an existing email UID as a reviewable Odysseus document — does NOT send. Use this, not `reply_to_email`, for normal "write/draft a reply saying X" requests — it's the safe default whenever the user hasn't explicitly said to send now. Threads automatically (In-Reply-To/References). Never invent UID 1; use the exact UID from `list_emails`/`search_emails`/`read_email`.
+
+CRITICAL — signatures: DO NOT invent a sign-off name; end with just `Thanks,` or similar unless told what to sign as.""",
+    "ai_draft_email_reply": "- ```ai_draft_email_reply``` — Generate an AI-written reply draft for an existing email UID (using Settings > Email > Writing Style) as a reviewable Odysseus document — does NOT send. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"reply_all\": false, \"account\": \"gmail\"}. Use when the user asks you to write/draft a reply WITHOUT dictating the exact body (vs. `draft_email_reply`, which takes body text they gave you). Never invent UID 1.",
     "bulk_email": """\
 ```bulk_email
 {"action": "delete", "uids": ["10997", "10998"], "folder": "INBOX", "account": "Gmail"}
 ```
-Bulk delete/archive/mark emails. Use this for "delete all those" after listing emails. Pass the exact UIDs and the same account from the list result, then report only the tool result.""",
-    "delete_email": "- ```delete_email``` — Delete one email by UID. Args (JSON): {\"uid\":\"...\", \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email.",
-    "archive_email": "- ```archive_email``` — Archive one email by UID. Args (JSON): {\"uid\":\"...\", \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email.",
-    "mark_email_read": "- ```mark_email_read``` — Mark one email read/unread. Args (JSON): {\"uid\":\"...\", \"read\":true, \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email.",
+Bulk delete/archive/mark emails. Use this for "delete all those" after listing emails. Pass the exact UIDs and the same account from the list result, then report only the tool result.
+
+CRITICAL: `delete` with `permanent: true`, and `all_unread: true` (which sweeps every unread message), are IRREVERSIBLE. When `agent_email_confirm` is on (default), the tool does NOT touch IMAP — it returns `{pending: true, pending_id: ...}` and stages the action for the user to approve from the Pending Actions list instead. Tell the user what you staged and that nothing happened yet; do not claim the messages were deleted/archived/marked until they approve.""",
+    "delete_email": "- ```delete_email``` — Delete one email by UID. Args (JSON): {\"uid\":\"...\", \"folder\":\"INBOX\", \"account\":\"Gmail\", \"permanent\":false}. For multiple messages use bulk_email. `permanent: true` is IRREVERSIBLE. When `agent_email_confirm` is on (default), this stages the delete for approval (`{pending: true, pending_id: ...}`) instead of touching IMAP — say what you staged, don't claim it's deleted yet.",
+    "archive_email": "- ```archive_email``` — Archive one email by UID. Args (JSON): {\"uid\":\"...\", \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email. When `agent_email_confirm` is on (default), this stages the archive for approval (`{pending: true, pending_id: ...}`) instead of touching IMAP — say what you staged, don't claim it's archived yet.",
+    "mark_email_read": "- ```mark_email_read``` — Mark one email read/unread. Args (JSON): {\"uid\":\"...\", \"read\":true, \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email. When `agent_email_confirm` is on (default), this stages the change for approval (`{pending: true, pending_id: ...}`) instead of touching IMAP — say what you staged, don't claim it's done yet.",
     "resolve_contact": "- ```resolve_contact``` — Look up a contact's email by name. Searches CardDAV address book + sent email history. Args (JSON): {\"name\": \"...\"}. Use BEFORE send_email when the user gives only a name.",
     "manage_contact": "- ```manage_contact``` — Create/update/delete/list CardDAV contacts. Args (JSON): {\"action\": \"list|add|update|delete\", \"name\": \"...\", \"email\": \"...\", \"phones\": [...], \"address\": \"...\", \"uid\": \"...\"}. Use for info about another person: email, phone, postal address. For 'save this for <person>' / address paste / phone next to a name, use this — NOT manage_memory. Do NOT use for user identity facts ('my name is X'); those are manage_memory. For update/delete, call action=list first for the uid.",
     "manage_calendar": """\
@@ -966,11 +998,17 @@ _ADMIN_KEYWORDS = [
     "task", "tasks", "schedule", "cron", "setting", "settings", "preference",
     "configure", "config", "setup", "manage", "admin", "pipeline", "second opinion",
     "list models", "switch model", "change model", "theme", "create theme",
-    # Documents — "show/list/read my docs", "open my notes file", etc.
-    # Without these, manage_documents never reaches the prompt and the
-    # agent flails (curl, bash) instead of using the right tool.
-    "document", "documents", "doc", "docs", "library", "tidy",
-    "note", "notes", "todo", "todos", "reminder", "reminders",
+    # NOTE: content-tool keywords (note/todo/reminder/document/doc/library) were
+    # deliberately removed here. They are NOT admin operations, yet tripping
+    # _detect_admin_intent unions the ENTIRE _ADMIN_TOOLS set (manage_endpoints,
+    # manage_mcp, manage_webhooks, manage_tokens, manage_settings, …) into the
+    # turn's schema list. On local models that ~25-tool flood is catastrophic:
+    # measured qwen3:14b note-creation success collapsed to 5% (it omits the
+    # required `action` arg or refuses), vs 100% with only the relevant tools.
+    # manage_notes / manage_tasks / manage_calendar / manage_documents already
+    # reach the prompt via _DOMAIN_TOOL_MAP ("notes_calendar_tasks", "documents")
+    # and the RAG / keyword-hint tool selection, so these keywords were both
+    # redundant and harmful. See _DOMAIN_TOOL_MAP below.
 ]
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
@@ -1301,7 +1339,28 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
 
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
-    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
+    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email)\b"):
+        domains.add("email")
+    # Correspondence-inquiry phrasing: prompts about a specific message a
+    # person/company sent, with no literal "email"/"mail"/"inbox" anywhere
+    # (e.g. "Do I have anything from A3 Tech Group about a partnership for
+    # my saber project?"). Previously this only matched the literal, hardcoded
+    # "message chris|message him|message her" — three names lifted from one
+    # earlier repro, which moved the same keyword-gate failure to the next
+    # unanticipated phrasing/name instead of fixing the underlying gap. These
+    # patterns key on the correspondence *verbs/constructions* people actually
+    # use to ask about messages, not on literal email vocabulary or names.
+    if has(
+        r"\b(anything|something|any (?:word|update|news))\b[^.?!\n]{0,40}\bfrom\b",
+        r"\b(hear|heard)\b[^.?!\n]{0,25}\bfrom\b",
+        r"\breach(?:ed|ing)?\s+out\b",
+        r"\bcontact(?:ed|ing)?\s+(?:me|us)\b",
+        r"\bsent\s+(?:me|us)\s+(?:a|an|the|some|something|anything|word|info|information|details)\b",
+        r"\b(?:write|wrote)\s+(?:to\s+)?(?:me|us)\b",
+        r"\b(?:get|got)\s+(?:back\s+to\s+me|in\s+touch)\b",
+        r"\bfollow(?:ed|ing)?\s+up\s+(?:with|on)\b",
+        r"\bmessage(?:d)?\s+\w+\b",
+    ):
         domains.add("email")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")

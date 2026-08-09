@@ -58,6 +58,18 @@ def _uid_fetch_rows(data) -> list:
 
 _ACCOUNT_CACHE: dict = {}  # key = normalized account selector -> config dict
 _MCP_OWNER_ARG = "_odysseus_owner"
+# list_emails' plain "recent inbox slice" default (20, unchanged) is fine for
+# a bare listing request, but it silently applied to unread_only/unresponded_only
+# too — an "attention" query with no way to page past it, so a caller (model or
+# human) that never thinks to raise max_results only ever sees the newest 20 of
+# however many actually need attention, a different subset each time as new
+# mail arrives ahead of the cutoff. Confirmed live: 58 real unread on this
+# account, `list_emails(unread_only=True)` with no max_results returned exactly
+# 20. Root-caused as (part of) the Task A triage coverage gap — qwen3:8b never
+# passed max_results, so it never saw more than this default either. Raised
+# only for attention-filtered queries, not the general default, so a plain
+# "show me my inbox" doesn't start dumping hundreds of read messages.
+_ATTENTION_QUERY_MAX_RESULTS = 200
 _CURRENT_OWNER: ContextVar[str | None] = ContextVar("email_mcp_owner", default=None)
 _OWNER_ENV_KEYS = ("ODYSSEUS_MCP_EMAIL_OWNER", "ODYSSEUS_EMAIL_OWNER")
 _OWNER_SCOPE_ERROR = (
@@ -1086,9 +1098,61 @@ def _list_emails_across_accounts(folder="INBOX", max_results=20,
     return combined[:max_results], errors
 
 
+# Dropped from free-text search queries before building the IMAP command:
+# common English stopwords rarely appear verbatim in a message the same way
+# they appear in a natural-language question about it (e.g. a user asking
+# "the partnership idea FOR my saber project" doesn't mean the literal word
+# "for" has to be foundable in the email), and requiring every one of them to
+# match (see _build_imap_search_query) turned harmless words into silent
+# false negatives. Kept intentionally small/conservative rather than a full
+# NLP stopword list — this only needs to stop AND-ing on connective words.
+_SEARCH_QUERY_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "for", "to", "in", "on", "at", "is", "was", "were",
+    "be", "been", "and", "or", "my", "your", "his", "her", "their", "our",
+    "about", "from", "with", "did", "do", "does", "i", "me", "that", "this",
+    "any", "ever", "get", "got",
+})
+
+
+def _build_imap_search_query(query: str) -> str:
+    """Build an IMAP SEARCH command that matches a natural-language query.
+
+    The naive approach — searching for the whole query string as one literal
+    phrase in FROM/SUBJECT/TEXT — requires an exact substring match, so a
+    query like "partnership idea for my saber project" fails against a real
+    subject like "Partnership idea on your saber project" (different words),
+    even though every meaningful term is present. Instead: split into terms,
+    drop stopwords (falling back to the unfiltered list if that empties it),
+    and require each remaining term to appear in FROM, SUBJECT, or TEXT
+    (OR'd per term) while requiring ALL terms to match (IMAP SEARCH ANDs
+    multiple keys placed side by side — no explicit AND needed). Leading/
+    trailing punctuation is stripped per term (a trailing "?" from a
+    question like "...saber project?" would otherwise never match a subject
+    that doesn't itself end in "project?")."""
+    raw_terms = [t for t in re.split(r"\s+", str(query).strip()) if t]
+    terms = []
+    for t in raw_terms:
+        stripped = re.sub(r"^[^\w]+|[^\w]+$", "", t)
+        if stripped:
+            terms.append(stripped)
+    # Punctuation-only query (e.g. "???"): fall back to the raw tokens rather
+    # than emit an empty, syntactically-invalid IMAP search command.
+    if not terms:
+        terms = raw_terms
+    filtered = [t for t in terms if t.lower() not in _SEARCH_QUERY_STOPWORDS]
+    if filtered:
+        terms = filtered
+    term_clauses = []
+    for term in terms:
+        t = term.replace("\\", "\\\\").replace('"', '\\"')
+        term_clauses.append(f'(OR OR FROM "{t}" SUBJECT "{t}" TEXT "{t}")')
+    return "(" + " ".join(term_clauses) + ")"
+
+
 def _search_emails(query, folders=None, max_results=20, account=None):
     """IMAP-search emails by free-text query. Matches FROM, SUBJECT, and
-    body TEXT. Walks multiple folders so older threads outside INBOX
+    body TEXT, term-by-term (see _build_imap_search_query) rather than as one
+    literal phrase. Walks multiple folders so older threads outside INBOX
     (Sent/Archive) are still findable. Returns the same shape as
     _list_emails plus an `_folder` tag."""
     if not query or not str(query).strip():
@@ -1096,10 +1160,7 @@ def _search_emails(query, folders=None, max_results=20, account=None):
     fixture = _fixture_search_emails(query, folders=folders, max_results=max_results, account=account)
     if fixture is not None:
         return fixture
-    q = str(query).replace("\\", "\\\\").replace('"', '\\"')
-    # Mail clients commonly use OR FROM/SUBJECT/TEXT to match either field.
-    # IMAP SEARCH OR is binary, so we nest it.
-    search_cmd = f'(OR OR FROM "{q}" SUBJECT "{q}" TEXT "{q}")'
+    search_cmd = _build_imap_search_query(query)
     if folders is None:
         folders = ["INBOX", "Sent", "Archive"]
     cache = _get_cached_summaries()
@@ -1463,6 +1524,91 @@ def _stash_agent_draft(*, to, subject, body, in_reply_to=None, references=None,
             "✋ Draft staged for your approval — nothing has been sent yet.\n"
             "Review the To/Subject/Body above. Reply 'send' to deliver, or "
             "'cancel' to discard."
+        ),
+    }
+
+
+def _stash_pending_email_action(
+    action, *, uid=None, uids=None, folder="INBOX", permanent=False,
+    read=None, bulk_action=None, all_unread=False, account=None,
+    description="",
+) -> dict:
+    """Insert a mutating, non-send email action into pending_email_actions
+    instead of executing it. Mirrors _stash_agent_draft's send-confirm
+    pattern (#see _read_agent_email_confirm_setting) for archive_email,
+    delete_email, mark_email_read, and bulk_email — the four builtin email
+    tools that used to execute immediately against real IMAP with no
+    confirmation gate. The row sits with status='agent_pending' until a
+    human approves or cancels it via the /api/email/pending-actions
+    endpoints (routes/email_routes.py), which run in the main app process
+    and perform the actual IMAP mutation using the same helpers the human
+    "Archive"/"Delete"/"Mark read" buttons in the UI already use — this
+    MCP server process only ever stages the request, never executes it
+    while confirmation is required."""
+    try:
+        from src.constants import SCHEDULED_EMAILS_DB
+    except Exception:
+        return {"success": False, "error": "Pending-action storage unavailable"}
+    pending_id = uuid.uuid4().hex[:16]
+    now = datetime.utcnow().isoformat()
+    try:
+        conn = sqlite3.connect(SCHEDULED_EMAILS_DB)
+        # Touch the schema in case this is the first pending action ever
+        # staged (mirrors _stash_agent_draft's lazy CREATE TABLE IF NOT
+        # EXISTS — the MCP server can boot independently of email-routes
+        # init).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_email_actions (
+                id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                uid TEXT,
+                uids TEXT,
+                folder TEXT NOT NULL DEFAULT 'INBOX',
+                permanent INTEGER NOT NULL DEFAULT 0,
+                read_flag INTEGER,
+                bulk_action TEXT,
+                all_unread INTEGER NOT NULL DEFAULT 0,
+                description TEXT,
+                account_id TEXT,
+                owner TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'agent_pending',
+                result TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO pending_email_actions
+            (id, action, uid, uids, folder, permanent, read_flag, bulk_action,
+             all_unread, description, account_id, owner, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent_pending')
+        """, (
+            pending_id,
+            action,
+            str(uid) if uid is not None else None,
+            json.dumps(list(uids)) if uids else None,
+            folder or "INBOX",
+            1 if permanent else 0,
+            None if read is None else (1 if read else 0),
+            bulk_action,
+            1 if all_unread else 0,
+            description or "",
+            account or None,
+            _current_owner(),
+            now,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return {"success": False, "error": f"Failed to stash pending action: {e}"}
+    return {
+        "success": True,
+        "pending": True,
+        "pending_id": pending_id,
+        "action": action,
+        "message": (
+            f"✋ {description} — staged for your approval, nothing has happened "
+            "yet.\nApprove or cancel it from the Pending Actions list in the "
+            "email panel, or tell me to cancel."
         ),
     }
 
@@ -2105,6 +2251,20 @@ async def list_tools() -> list[Tool]:
                            "Omit to use the default account. Use list_email_accounts to discover available accounts.",
         },
     }
+    # Caller identity, injected by tool_execution.py/agent_loop.py before every
+    # real dispatch (see _MCP_OWNER_ARG) — never model-supplied. Any schema
+    # that adds "additionalProperties": false must declare this too, or every
+    # real call (which always carries it once an owner is authenticated) gets
+    # rejected right alongside the invalid arguments the strictness was meant
+    # to catch. Confirmed live: turning on additionalProperties:false for
+    # list_emails without this broke 100% of calls, not just the invented-arg
+    # ones, until this was added.
+    OWNER_PROP = {
+        _MCP_OWNER_ARG: {
+            "type": "string",
+            "description": "Internal: caller identity injected by the agent runtime. Do not set this.",
+        },
+    }
     return [
         Tool(
             name="list_email_accounts",
@@ -2120,7 +2280,10 @@ async def list_tools() -> list[Tool]:
             description=(
                 "List unread or unresponded emails from the inbox. "
                 "Returns subject, sender, date, and cached AI summary for each. "
-                "Use this to check what emails need attention. "
+                "Use this to check what emails need attention — with unread_only "
+                "or unresponded_only set, this is NOT capped at 20; it returns up "
+                "to 200 so a busy inbox doesn't silently hide older unread mail. "
+                "Without either filter, returns the most recent 20 by default. "
                 "Pass `account` to scan a non-default mailbox."
             ),
             inputSchema={
@@ -2136,6 +2299,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of emails to return (default: 20)",
                         "default": 20,
                     },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Backward-compatible alias for max_results.",
+                    },
                     "unresponded_only": {
                         "type": "boolean",
                         "description": "Only show emails without replies (default: false)",
@@ -2147,8 +2314,19 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                     **ACCOUNT_PROP,
+                    **OWNER_PROP,
                 },
                 "required": [],
+                # Was missing: a model that invents an out-of-schema argument
+                # (e.g. `query`, attempting to smuggle search intent into this
+                # tool) got the extra key silently accepted and ignored rather
+                # than rejected — masking a real tool-choice failure as a
+                # "successful" call that happened to work by luck of falling
+                # inside the default recency window. `limit` is declared above
+                # specifically so this doesn't also reject the one alias the
+                # handler (`arguments.get("max_results", arguments.get("limit", 20))`)
+                # actually supports.
+                "additionalProperties": False,
             },
         ),
         Tool(
@@ -2490,9 +2668,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         acct = arguments.get("account")  # consumed by all email ops
 
         if name == "list_emails":
-            max_results = arguments.get("max_results", arguments.get("limit", 20))
             unresponded_only = arguments.get("unresponded_only", False)
             unread_only = arguments.get("unread_only", False)
+            _explicit_max_results = arguments.get("max_results", arguments.get("limit"))
+            if _explicit_max_results is not None:
+                max_results = _explicit_max_results
+            elif unread_only or unresponded_only:
+                max_results = _ATTENTION_QUERY_MAX_RESULTS
+            else:
+                max_results = 20
             # Build a header note so the LLM always knows which account was hit
             # AND what other accounts exist. Prevents "I can see emails" →
             # user: "I have 2 inboxes" → "which one?" loop.
@@ -2829,19 +3013,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             uid = arguments.get("uid")
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
-            ok = _archive_email(uid, arguments.get("folder", "INBOX"), account=acct)
+            folder = arguments.get("folder", "INBOX")
+            if _read_agent_email_confirm_setting():
+                staged = _stash_pending_email_action(
+                    "archive", uid=uid, folder=folder, account=acct,
+                    description=f"Archive UID {uid} in {folder}",
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _archive_email(uid, folder, account=acct)
             return [TextContent(type="text", text=f"{'Archived' if ok else 'Failed to archive'} UID {uid}")]
 
         elif name == "delete_email":
             uid = arguments.get("uid")
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
-            ok = _delete_email(
-                uid,
-                arguments.get("folder", "INBOX"),
-                permanent=bool(arguments.get("permanent", False)),
-                account=acct,
-            )
+            folder = arguments.get("folder", "INBOX")
+            permanent = bool(arguments.get("permanent", False))
+            if _read_agent_email_confirm_setting():
+                desc = f"{'Permanently delete' if permanent else 'Delete'} UID {uid} in {folder}"
+                if permanent:
+                    desc += " — THIS CANNOT BE UNDONE"
+                staged = _stash_pending_email_action(
+                    "delete", uid=uid, folder=folder, permanent=permanent, account=acct,
+                    description=desc,
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _delete_email(uid, folder, permanent=permanent, account=acct)
             return [TextContent(type="text", text=f"{'Deleted' if ok else 'Failed to delete'} UID {uid}")]
 
         elif name == "mark_email_read":
@@ -2849,8 +3046,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not uid:
                 return [TextContent(type="text", text="Error: uid is required")]
             read = bool(arguments.get("read", True))
-            ok = _set_flag(uid, arguments.get("folder", "INBOX"), "\\Seen", add=read, account=acct)
+            folder = arguments.get("folder", "INBOX")
             state = "read" if read else "unread"
+            if _read_agent_email_confirm_setting():
+                staged = _stash_pending_email_action(
+                    "mark_email_read", uid=uid, folder=folder, read=read, account=acct,
+                    description=f"Mark UID {uid} in {folder} as {state}",
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
+            ok = _set_flag(uid, folder, "\\Seen", add=read, account=acct)
             return [TextContent(type="text", text=f"{'Marked' if ok else 'Failed to mark'} UID {uid} as {state}")]
 
         elif name == "bulk_email":
@@ -2858,6 +3062,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             folder = arguments.get("folder", "INBOX")
             all_unread = bool(arguments.get("all_unread", False))
             uids = arguments.get("uids") or []
+            permanent = bool(arguments.get("permanent", False))
+            if _read_agent_email_confirm_setting():
+                if not uids and not all_unread:
+                    return [TextContent(type="text", text="No messages selected (pass uids or all_unread=true).")]
+                if all_unread:
+                    target_desc = "all unread messages"
+                else:
+                    target_desc = f"{len(uids)} message(s)"
+                desc = f"Bulk {action or '(no action)'} {target_desc} in {folder}"
+                if action == "delete" and permanent:
+                    desc += " — PERMANENT, cannot be undone"
+                staged = _stash_pending_email_action(
+                    "bulk_email", uids=uids, folder=folder, permanent=permanent,
+                    bulk_action=action, all_unread=all_unread, account=acct,
+                    description=desc,
+                )
+                return [TextContent(type="text", text=staged.get("message") or staged.get("error", "Failed to stage action"))]
             if all_unread:
                 uids = _search_uids(folder, "UNSEEN", account=acct)
             if not uids:

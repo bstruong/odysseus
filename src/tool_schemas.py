@@ -1128,7 +1128,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_emails",
-            "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false.",
+            "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false. For triage/'what needs attention' requests, set unread_only=true (or unresponded_only=true) and omit max_results — that returns up to 200, not the plain-listing default of 20.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1139,6 +1139,12 @@ FUNCTION_TOOL_SCHEMAS = [
                     "unresponded_only": {"type": "boolean", "description": "Only show unanswered emails. Default false."},
                     "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, e.g. Gmail or user@example.com"},
                 },
+                # Kept in sync with mcp_servers/email_server.py's list_emails
+                # inputSchema, which is the schema actually enforced (via the
+                # MCP SDK's jsonschema.validate on every call). Without this,
+                # a model that invented a `query` argument here to smuggle
+                # search intent into list_emails got it silently accepted.
+                "additionalProperties": False,
             }
         }
     },
@@ -1275,6 +1281,97 @@ FUNCTION_TOOL_SCHEMAS = [
                     "account": {"type": "string", "description": "Account name/email/id from list_email_accounts"},
                 },
                 "required": ["uid"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_emails",
+            "description": "Search emails by free-text query matching sender, subject, or body. Walks INBOX + Sent + Archive by default, so use this (not list_emails) whenever the user names a person or topic that may not be in the most recent inbox slice — e.g. 'saber', 'invoice from EY', 'last email about the property'. Returns matching emails with their UIDs for read_email/reply_to_email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Free-text query. Matches FROM, SUBJECT, and body TEXT."},
+                    "folders": {"type": "array", "items": {"type": "string"}, "description": "Folders to search (default: INBOX, Sent, Archive)"},
+                    "max_results": {"type": "integer", "description": "Max results per folder (default: 20)"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, e.g. Gmail or user@example.com"},
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_email",
+            "description": "Create a new Odysseus email compose draft document. This DOES NOT send. Use this as the default way to write a new email for the user: it opens a reviewable email document with To/Cc/Bcc/Subject/body that the user can edit or send from Odysseus. For replying to an existing email, use draft_email_reply or ai_draft_email_reply instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email address(es), comma-separated"},
+                    "subject": {"type": "string", "description": "Email subject line"},
+                    "body": {"type": "string", "description": "Draft body"},
+                    "cc": {"type": "string", "description": "CC address(es), comma-separated (optional)"},
+                    "bcc": {"type": "string", "description": "BCC address(es), comma-separated (optional)"},
+                    "title": {"type": "string", "description": "Optional Odysseus document title"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, e.g. Gmail or user@example.com"},
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_email_reply",
+            "description": "Create an Odysseus email reply draft document for an existing email UID. This DOES NOT send. It threads the draft with In-Reply-To/References, prefills the recipient and subject, and lets the user review and send from the normal email composer. Prefer this over reply_to_email whenever the user says 'write/draft a reply' without explicitly saying to send now.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Exact Email UID from list_emails/read_email; never invent UID 1"},
+                    "body": {"type": "string", "description": "Draft reply body text"},
+                    "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                    "reply_all": {"type": "boolean", "description": "Reply to all recipients (default: false)"},
+                    "title": {"type": "string", "description": "Optional Odysseus document title"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, especially when the UID came from a non-default mailbox"},
+                },
+                "required": ["uid", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ai_draft_email_reply",
+            "description": "Generate an AI reply using Odysseus' existing AI Reply behavior (including Settings > Email > Writing Style), then create an email compose document for review. This DOES NOT send and does NOT save to the mailbox Drafts folder. Use this when the user asks you to write or draft a reply to an email without dictating the exact body text yourself.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Exact Email UID from list_emails/read_email; never invent UID 1"},
+                    "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                    "reply_all": {"type": "boolean", "description": "Reply to all recipients (default: false)"},
+                    "title": {"type": "string", "description": "Optional Odysseus document title"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, especially when the UID came from a non-default mailbox"},
+                },
+                "required": ["uid"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_attachment",
+            "description": "Download an email attachment to local disk so you can read it. Returns the local file path, which you can then read with read_file. Use this when you need to review a document, spreadsheet, or other file attached to an email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Email UID from list_emails"},
+                    "index": {"type": "integer", "description": "Attachment index (from read_email's attachments list)"},
+                    "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+                "required": ["uid", "index"]
             }
         }
     },

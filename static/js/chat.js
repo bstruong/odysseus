@@ -2406,17 +2406,44 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
                 const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
+                // Structural fallback for the reply-boundary check below: a fixed list of
+                // reply-opener WORDS is too narrow — it missed every one of gemma4:e4b's
+                // actual reply openers in real usage ("The current price...", "Could you
+                // please...", "Are you referring...", "I apologize..."), leaving the whole
+                // response (including the real answer) stuck in the thinking box forever
+                // (confirmed via real chat_messages: backend saved the correct answer every
+                // time, live view never showed it). Recognizing "this still looks like
+                // reasoning" is a much smaller, more tractable pattern space than
+                // enumerating every way a genuine reply can start, so use a denylist:
+                // once we're past a paragraph break, the first line that does NOT look like
+                // a continuation of structured/numbered reasoning is the boundary.
+                const _stillReasoningLine = (rawLine) => {
+                  const t = rawLine.trim();
+                  if (!t) return true; // blank — keep scanning, not a boundary itself
+                  if (/^\d+[.)]\s/.test(t)) return true;                 // "1. ..." / "2) ..."
+                  if (/^\s+[-*]\s/.test(rawLine)) return true; // indented sub-bullet
+                  if (/^(?:step\s*\d|self-correction)\b/i.test(t)) return true;
+                  return false;
+                };
                 if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
                   const _trimmedRT = normalizedRoundText.trimStart();
                   const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
                   if (_isReasoning) {
-                    // Check if we can see a reply boundary yet (newline then reply pattern)
+                    // Check if we can see a reply boundary yet: either a line starting
+                    // with a known reply-opener word, or (structural fallback) the first
+                    // line past a paragraph break that no longer looks like reasoning.
                     const _lines = _trimmedRT.split('\n');
                     let _replyFound = false;
+                    let _sawParagraphBreak = false;
                     for (let li = 1; li < _lines.length; li++) {
-                      const _l = _lines[li].trim();
-                      if (!_l) continue;
+                      const _raw = _lines[li];
+                      const _l = _raw.trim();
+                      if (!_l) { _sawParagraphBreak = true; continue; }
                       if (_replyPrefixes.some(rp => _l.startsWith(rp))) {
+                        _replyFound = true;
+                        break;
+                      }
+                      if (_sawParagraphBreak && !_stillReasoningLine(_raw)) {
                         _replyFound = true;
                         break;
                       }

@@ -1,0 +1,22 @@
+digraph svc {
+  labelloc="t"; label="Clean service classes: inheritance (solid, is-a) + instantiation (dashed, who-news-whom)";
+  rankdir=LR; node [shape=box,fontsize=10];
+  "EmbeddingClient" [style=filled,fillcolor="#a7f3b4",xlabel="src.embeddings"];
+  "FastEmbedClient" [style=filled,fillcolor="#a7f3b4",xlabel="src.embeddings"];
+  "McpManager" [style=filled,fillcolor="#a7f3b4",xlabel="src.mcp_manager"];
+  "MemoryManager" [style=filled,fillcolor="#a7f3b4",xlabel="src.memory"];
+  "MemoryProvider" [style=filled,fillcolor="#a7f3b4",xlabel="src.memory_provider"];
+  "MemoryProviderRegistry" [style=filled,fillcolor="#a7f3b4",xlabel="src.memory_provider"];
+  "NativeMemoryProvider" [style=filled,fillcolor="#a7f3b4",xlabel="src.memory_provider"];
+  "RAGManager" [style=filled,fillcolor="#a7f3b4",xlabel="src.rag_manager"];
+  "ToolIndex" [style=filled,fillcolor="#a7f3b4",xlabel="src.tool_index"];
+  "ToolPolicy" [style=filled,fillcolor="#a7f3b4",xlabel="src.tool_policy"];
+  "ABC" [shape=ellipse,fillcolor="#dddddd",style=filled];
+  "MemoryProvider" -> "ABC" [color="#006600",penwidth=2,label="is-a"];
+  "NativeMemoryProvider" -> "MemoryProvider" [color="#006600",penwidth=2,label="is-a"];
+  "embedding_lanes" [shape=note,fontsize=8]; "embedding_lanes" -> "FastEmbedClient" [style=dashed,color="#888888"];
+  "app_initializer" [shape=note,fontsize=8]; "app_initializer" -> "MemoryManager" [style=dashed,color="#888888"];
+  "builtin_actions" [shape=note,fontsize=8]; "builtin_actions" -> "MemoryManager" [style=dashed,color="#888888"];
+  "app_initializer" [shape=note,fontsize=8]; "app_initializer" -> "MemoryProviderRegistry" [style=dashed,color="#888888"];
+  "app_initializer" [shape=note,fontsize=8]; "app_initializer" -> "NativeMemoryProvider" [style=dashed,color="#888888"];
+}
