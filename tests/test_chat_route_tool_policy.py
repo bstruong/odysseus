@@ -127,6 +127,61 @@ def test_workspace_auto_escalation_keeps_shell_tools():
     assert "if auto_escalated and not _workspace_agent_intent:" in source
 
 
+def test_explicit_web_intent_strips_browser_mcp_tools():
+    """Regression: commit d8a2059d ("Merge verified Odysseus fixes") replaced
+    the legacy single "builtin_browser" tool name with the granular
+    _BROWSER_MCP_TOOLS set (browser_navigate, browser_click, etc.) and updated
+    most disabled_tools.update() call sites to match — but missed this one.
+    The explicit-web-intent block just had "builtin_browser" deleted outright,
+    with no replacement, so a direct lookup/search turn silently stopped
+    stripping the 12 browser-automation tools it used to strip.
+
+    A plain substring check for "disabled_tools.update(_BROWSER_MCP_TOOLS)"
+    would pass even without the fix, since that call already exists at other
+    (correct) call sites in this file — so this test walks the AST to confirm
+    the call is specifically inside the `if _explicit_web_intent:` block.
+    """
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    chat_stream_func = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "chat_stream":
+            chat_stream_func = node
+            break
+    assert chat_stream_func is not None, "chat_stream function not found"
+
+    web_intent_if = None
+    for node in ast.walk(chat_stream_func):
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "_explicit_web_intent"
+        ):
+            web_intent_if = node
+            break
+    assert web_intent_if is not None, "`if _explicit_web_intent:` block not found"
+
+    found_browser_strip = False
+    for node in ast.walk(web_intent_if):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "disabled_tools"
+        ):
+            for arg in node.args:
+                if isinstance(arg, ast.Name) and arg.id == "_BROWSER_MCP_TOOLS":
+                    found_browser_strip = True
+    assert found_browser_strip, (
+        "the explicit-web-intent block must call "
+        "disabled_tools.update(_BROWSER_MCP_TOOLS) — a direct lookup/search "
+        "turn must not leave the 12 granular browser-automation tools "
+        "(browser_navigate, browser_click, browser_fill_form, etc.) callable"
+    )
+
+
 # ── Functional tests of the disabled-tools logic ───────────────
 
 

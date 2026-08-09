@@ -1114,6 +1114,7 @@ def setup_chat_routes(
                 "send_email", "reply_to_email",
                 "api_call",
             })
+            disabled_tools.update(_BROWSER_MCP_TOOLS)
             if _search_enabled:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
             else:
