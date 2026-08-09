@@ -1086,9 +1086,61 @@ def _list_emails_across_accounts(folder="INBOX", max_results=20,
     return combined[:max_results], errors
 
 
+# Dropped from free-text search queries before building the IMAP command:
+# common English stopwords rarely appear verbatim in a message the same way
+# they appear in a natural-language question about it (e.g. a user asking
+# "the partnership idea FOR my saber project" doesn't mean the literal word
+# "for" has to be foundable in the email), and requiring every one of them to
+# match (see _build_imap_search_query) turned harmless words into silent
+# false negatives. Kept intentionally small/conservative rather than a full
+# NLP stopword list — this only needs to stop AND-ing on connective words.
+_SEARCH_QUERY_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "for", "to", "in", "on", "at", "is", "was", "were",
+    "be", "been", "and", "or", "my", "your", "his", "her", "their", "our",
+    "about", "from", "with", "did", "do", "does", "i", "me", "that", "this",
+    "any", "ever", "get", "got",
+})
+
+
+def _build_imap_search_query(query: str) -> str:
+    """Build an IMAP SEARCH command that matches a natural-language query.
+
+    The naive approach — searching for the whole query string as one literal
+    phrase in FROM/SUBJECT/TEXT — requires an exact substring match, so a
+    query like "partnership idea for my saber project" fails against a real
+    subject like "Partnership idea on your saber project" (different words),
+    even though every meaningful term is present. Instead: split into terms,
+    drop stopwords (falling back to the unfiltered list if that empties it),
+    and require each remaining term to appear in FROM, SUBJECT, or TEXT
+    (OR'd per term) while requiring ALL terms to match (IMAP SEARCH ANDs
+    multiple keys placed side by side — no explicit AND needed). Leading/
+    trailing punctuation is stripped per term (a trailing "?" from a
+    question like "...saber project?" would otherwise never match a subject
+    that doesn't itself end in "project?")."""
+    raw_terms = [t for t in re.split(r"\s+", str(query).strip()) if t]
+    terms = []
+    for t in raw_terms:
+        stripped = re.sub(r"^[^\w]+|[^\w]+$", "", t)
+        if stripped:
+            terms.append(stripped)
+    # Punctuation-only query (e.g. "???"): fall back to the raw tokens rather
+    # than emit an empty, syntactically-invalid IMAP search command.
+    if not terms:
+        terms = raw_terms
+    filtered = [t for t in terms if t.lower() not in _SEARCH_QUERY_STOPWORDS]
+    if filtered:
+        terms = filtered
+    term_clauses = []
+    for term in terms:
+        t = term.replace("\\", "\\\\").replace('"', '\\"')
+        term_clauses.append(f'(OR OR FROM "{t}" SUBJECT "{t}" TEXT "{t}")')
+    return "(" + " ".join(term_clauses) + ")"
+
+
 def _search_emails(query, folders=None, max_results=20, account=None):
     """IMAP-search emails by free-text query. Matches FROM, SUBJECT, and
-    body TEXT. Walks multiple folders so older threads outside INBOX
+    body TEXT, term-by-term (see _build_imap_search_query) rather than as one
+    literal phrase. Walks multiple folders so older threads outside INBOX
     (Sent/Archive) are still findable. Returns the same shape as
     _list_emails plus an `_folder` tag."""
     if not query or not str(query).strip():
@@ -1096,10 +1148,7 @@ def _search_emails(query, folders=None, max_results=20, account=None):
     fixture = _fixture_search_emails(query, folders=folders, max_results=max_results, account=account)
     if fixture is not None:
         return fixture
-    q = str(query).replace("\\", "\\\\").replace('"', '\\"')
-    # Mail clients commonly use OR FROM/SUBJECT/TEXT to match either field.
-    # IMAP SEARCH OR is binary, so we nest it.
-    search_cmd = f'(OR OR FROM "{q}" SUBJECT "{q}" TEXT "{q}")'
+    search_cmd = _build_imap_search_query(query)
     if folders is None:
         folders = ["INBOX", "Sent", "Archive"]
     cache = _get_cached_summaries()
