@@ -20,9 +20,14 @@ explicitly marked otherwise. Items that could not be verified are listed at the 
 - **Ollama endpoint row** (`data/app.db`, table `model_endpoints`):
   `id=a3c5a269`, `base_url=http://host.docker.internal:11434/v1`, `supports_tools=1`,
   `is_enabled=1`.
-- **Default model** (`data/settings.json`): `default_model=qwen3:8b`,
-  `default_endpoint_id=a3c5a269`, `utility_model=""` (empty → inherits the default).
-  Verified `resolve_endpoint("default")` → `qwen3:8b @ …/v1/chat/completions`.
+- **Default model** (`data/settings.json`): was `default_model=qwen3:8b` when this section
+  was verified on 2026-07-19 (`resolve_endpoint("default")` → `qwen3:8b @ …/v1/chat/completions`
+  at that time). **CORRECTED 2026-08-09**: re-checked `data/settings.json` directly — the
+  current live value is `default_model=gemma4:e4b` (also `research_model=gemma4:e4b`),
+  `default_endpoint_id=a3c5a269` (unchanged), `utility_model=""` (unchanged, still empty →
+  inherits the default). qwen3:8b is no longer installed in Ollama at all (`ollama list`
+  confirms). See `SYNC.md` section 1 for the switch rationale (Phase 2 session 7, cross-model
+  benchmark: 92% vs. 69% clean correctness, faster, lower VRAM).
 - **`OLLAMA_CONTEXT_LENGTH=16384`** — VERIFIED by reading the drop-in directly:
   `/etc/systemd/system/ollama.service.d/override.conf` contains both
   `OLLAMA_HOST=0.0.0.0:11434` and `OLLAMA_CONTEXT_LENGTH=16384`; both are present in the
@@ -121,9 +126,12 @@ Notes:
 - Prior-session single-run numbers (e.g. qwen3:14b "73%") were under different conditions
   and are NOT reflected in this table.
 
-**Conclusion (backed by the above):** `qwen3:8b` is the best local model — matches/beats
-qwen3:14b on quality, 0 fabrications even at ~13k tokens, and fits VRAM (8.15 GB vs the
-14b's 10.82 GB, which exceeds the ~10.5 GB budget). It is already set as the default.
+**Conclusion (backed by the above, as of 2026-07-19):** `qwen3:8b` is the best local model
+of the four benchmarked in this session — matches/beats qwen3:14b on quality, 0 fabrications
+even at ~13k tokens, and fits VRAM (8.15 GB vs the 14b's 10.82 GB, which exceeds the ~10.5 GB
+budget). It was set as the default at the time. **CORRECTED 2026-08-09**: no longer current —
+`data/settings.json` now shows `default_model=gemma4:e4b`, switched in a later session per a
+separate cross-model benchmark not detailed in this document (see `SYNC.md` section 1).
 
 ## 5. OPEN BUGS / ISSUES (with confidence)
 
@@ -160,8 +168,10 @@ model-behavior observations:
 
 ## 8. NEXT STEPS
 
-- **Stage 5 — email/calendar integration.** qwen3:8b is the default and has passed notes,
-  web-search, and calendar sanity checks.
+- **Stage 5 — email/calendar integration.** qwen3:8b was the default at the time this section
+  was written and had passed notes, web-search, and calendar sanity checks. **CORRECTED
+  2026-08-09**: the default model is now `gemma4:e4b` (see section 1) — Stage 5 planning
+  should account for the current default, not qwen3:8b.
 - **Watch-item A — email tool gating (VERIFIED in code):** `reply_to_email`/`send_email`
   are stripped on web-intent turns (`routes/chat_routes.py:~899`) AND when an email reader
   is active (`routes/chat_routes.py:~920`, which also strips the `mcp__email__*` variants
