@@ -1975,6 +1975,77 @@ def _looks_like_success_claim(text: str) -> bool:
     return bool(_FAKE_SUCCESS_RE.search(text or ""))
 
 
+# Email draft/send completion-fabrication guard. Same principle as the notes
+# false-"saved"-confirmation fix (commit 9faf64ea): never let a persisted-
+# action claim stand without a corresponding verified state change. This one
+# is narrower and reactive rather than a routing fix, because the tool
+# selection gap that starves the model of email tools here (a "from
+# <Company>"/"on <host>" local-computer-request false match wholesale
+# swapping in the workspace/terminal toolset — see
+# _looks_like_local_computer_request) is the same gap the email-search eval
+# category hit, and is explicitly out of scope for this fix.
+#
+# Confirmed live: gemma4:12b-it-q4_K_M, stuck without any email tool, goes on
+# a long read_file/ls/grep/bash "goose chase" hunting for the email, then in
+# ~2/3 runs narrates a confident "I've prepared the following draft for your
+# review" / "a draft was previously prepared" with nothing ever written to
+# Odysseus. gemma4:e4b hits the identical missing-tool condition but already
+# answers honestly ("no draft tool available, here is suggested text only,
+# not saved") — that framing never matches _EMAIL_PERSIST_CLAIM_RE below, so
+# e4b's replies are left untouched by this guard.
+_EMAIL_PERSIST_REQUEST_RE = re.compile(
+    r"\bdraft\b.{0,40}\b(?:reply|email|message)\b|"
+    r"\breply\b.{0,40}\bemail\b|"
+    r"\bsend\b.{0,40}\bemail\b|"
+    r"\bemail\s+(?:a\s+)?reply\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_EMAIL_PERSIST_CLAIM_RE = re.compile(
+    r"\bi(?:'ve|\s+have)\s+(?:prepared|saved|drafted)\b|"
+    r"\bdraft\s+(?:is|was)\s+(?:ready|saved|prepared)\b|"
+    r"\bready\s+(?:for\s+your\s+review|to\s+send|in\s+your\s+drafts?)\b|"
+    r"\bhas\s+been\s+(?:sent|saved|drafted|prepared)\b|"
+    r"\b(?:already|previously)\s+(?:prepared|saved|drafted|sent)\b|"
+    r"\bin\s+your\s+drafts?\b|"
+    r"\bsuccessfully\b.{0,30}\b(?:draft|save|send|sent)\b",
+    re.IGNORECASE,
+)
+_EMAIL_PERSISTENCE_TOOLS = frozenset({
+    "draft_email", "draft_email_reply", "ai_draft_email_reply",
+    "send_email", "reply_to_email",
+    "mcp__email__draft_email", "mcp__email__draft_email_reply",
+    "mcp__email__ai_draft_email_reply", "mcp__email__send_email",
+    "mcp__email__reply_to_email",
+})
+
+
+def _looks_like_email_persist_request(text: str) -> bool:
+    return bool(_EMAIL_PERSIST_REQUEST_RE.search(text or ""))
+
+
+def _looks_like_email_persist_claim(text: str) -> bool:
+    return bool(_EMAIL_PERSIST_CLAIM_RE.search(text or ""))
+
+
+def _email_persist_tool_succeeded(tool_events: list) -> bool:
+    """Real state check: did a draft/send tool actually run and not error?
+
+    Mirrors the "Error: ..." text convention email_server.py tool results
+    already use on failure (see draft_email_reply/ai_draft_email_reply/
+    send_email/reply_to_email in mcp_servers/email_server.py) — a non-empty,
+    non-error-prefixed output is the same success signal the rest of this
+    module treats as ground truth (e.g. the "success" in result handling a
+    few hundred lines up).
+    """
+    for _ev in tool_events or []:
+        if _resolved_tool_event_name(_ev) not in _EMAIL_PERSISTENCE_TOOLS:
+            continue
+        _out = str(_ev.get("output") or "").strip()
+        if _out and not _out.lower().startswith("error"):
+            return True
+    return False
+
+
 _DOC_TOOL_TRUNCATED_FENCE_RE = re.compile(
     r"```(create|update|edit|edi|suggest)_documen(?!t)(?=\s|\n|```)",
     re.IGNORECASE,
@@ -5268,6 +5339,30 @@ async def stream_agent_loop(
     ):
         _final_delta = full_response.strip()
         yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
+
+    # Fabricated draft/send completion guard (see _EMAIL_PERSIST_CLAIM_RE
+    # above). Gated on real tool-execution state, not the model's own
+    # narration: only fires when the turn actually asked for an email
+    # draft/reply/send AND the reply asserts it happened AND no email
+    # persistence tool call actually succeeded this turn.
+    if (
+        _looks_like_email_persist_request(_last_user)
+        and _looks_like_email_persist_claim(full_response)
+        and not _email_persist_tool_succeeded(tool_events)
+    ):
+        _persist_correction = (
+            "\n\n**Correction:** that draft was not actually saved or sent — "
+            "no email tool completed this turn, so nothing above exists in "
+            "your drafts. Copy the text above manually if it's useful, or "
+            "ask again."
+        )
+        full_response = full_response.rstrip() + _persist_correction
+        yield 'data: ' + json.dumps({"delta": _persist_correction}) + '\n\n'
+        logger.warning(
+            "[agent] email persistence claim without a successful persistence "
+            "tool call this turn — appended honest correction (last_user=%r)",
+            (_last_user or "")[:160],
+        )
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
