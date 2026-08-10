@@ -1253,6 +1253,36 @@ def setup_chat_routes(
             research_sources = None
             web_sources = ctx.web_sources
 
+            # ── Zero-grounding escalation (design doc, priority-3 follow-up) ──
+            # e4b is the live default; it fabricated a confident wrong answer
+            # in testing when a web search for a time-sensitive query came back
+            # with nothing to ground on (SearXNG news-category outage). 12B
+            # hedged correctly under the same condition. This check reroutes
+            # ONLY this turn's generation to 12B when that specific condition
+            # holds — sess.model is never assigned here, so the session's
+            # default reverts to e4b on the very next turn.
+            #
+            # Known, accepted gaps (do not "fix" these here — see the design
+            # doc; both are deliberate scope boundaries, not oversights):
+            #   1. Only covers the pre-fetch use_web=True path, where
+            #      web_sources is known before generation starts. The agent's
+            #      own mid-conversation `web_search` TOOL calls (no explicit
+            #      use_web toggle) are a separate path where the result only
+            #      exists mid-generation — not covered.
+            #   2. Does NOT catch a model misreading search results that WERE
+            #      present (e.g. reading an in-development version number as
+            #      "the current stable release") — there is no thin-grounding
+            #      signal to trigger on in that case. That failure mode is an
+            #      accepted, documented gap, not solved by this check.
+            _ESCALATION_MODEL = "gemma4:12b-it-q4_K_M"
+            _MIN_GROUNDED_RESULTS = 2
+            _escalate_thin_grounding = (
+                bool(use_web)
+                and len(web_sources) < _MIN_GROUNDED_RESULTS
+                and (sess.model or "") != _ESCALATION_MODEL
+            )
+            _gen_model = _ESCALATION_MODEL if _escalate_thin_grounding else sess.model
+
             # Register active stream for partial-save safety net
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
 
@@ -1428,7 +1458,13 @@ def setup_chat_routes(
 
             # Send model name early so the frontend can show it during streaming
             _model_suffix = "Research" if effective_do_research else None
-            _model_info = {"type": "model_info", "model": sess.model}
+            if _escalate_thin_grounding:
+                # User-visible signal for the ~13s cold-swap latency this
+                # incurs (the 3060 can't keep both models resident at once —
+                # see the design doc). A silent multi-second gap here reads as
+                # a hang, not a feature.
+                _model_suffix = "Escalated — web search returned too few results to ground an answer"
+            _model_info = {"type": "model_info", "model": _gen_model}
             if _model_suffix:
                 _model_info["suffix"] = _model_suffix
             if ctx.preset.character_name:
@@ -1683,7 +1719,11 @@ def setup_chat_routes(
                 _agent_tool_calls = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
-                _actual_model = None
+                # Seed with the escalation model when it fired, so the existing
+                # requested-vs-actual audit trail (already used for the
+                # model-failed-fallback-answered case) reflects it even before
+                # stream_agent_loop's own model_actual event confirms it.
+                _actual_model = _gen_model if _escalate_thin_grounding else None
                 try:
                     from src.settings import get_setting
                     from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
@@ -1713,7 +1753,12 @@ def setup_chat_routes(
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
-                        sess.model,
+                        # _gen_model is sess.model unless zero-grounding
+                        # escalation fired above — sess.model/sess.endpoint_url
+                        # themselves are never reassigned, so this is strictly
+                        # per-turn: the session's own default is untouched and
+                        # the very next turn reverts to it automatically.
+                        _gen_model,
                         messages,
                         headers=sess.headers,
                         temperature=ctx.preset.temperature,
