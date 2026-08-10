@@ -2166,10 +2166,27 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 )
                 try:
                     await wait_for_interactive_quiet("email urgency action")
+                    # 220 was too small for a reasoning-heavy model like the
+                    # live default (gemma4:e4b): confirmed live against 6 real,
+                    # varied inbox emails that the model's <think>-equivalent
+                    # reasoning + JSON answer runs 541-849 completion tokens
+                    # (reasoning length tracks judgment complexity, not input
+                    # length — a short but ambiguous "Security alert" email
+                    # needed the most). At 220, every one of those 6 hit
+                    # finish_reason="length" and returned empty content —
+                    # the model was cut off mid-reasoning, before ever
+                    # reaching the answer, so classification silently
+                    # produced nothing for every unread email during the
+                    # scheduled scan. 2048 gives ~2.4x headroom over the
+                    # observed max rather than a value barely above one
+                    # sample. Not scaled by input length: the driver here is
+                    # reasoning complexity, which doesn't track input size
+                    # cleanly enough for a length-based formula to be more
+                    # correct than a generous fixed budget.
                     raw = await llm_call_async_with_fallback(
                         candidates,
                         [{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=220, timeout=30,
+                        temperature=0.1, max_tokens=2048, timeout=30,
                     )
                     # Tolerant JSON-parse: strip code fences if present.
                     txt = (raw or "").strip()
