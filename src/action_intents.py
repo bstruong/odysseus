@@ -76,6 +76,29 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("notes", "add item to notes/todo request", rf"{_PLEASE}(?:add|jot|write\s+down)\b.{{0,120}}\b(?:to|in|into)\s+(?:my\s+|the\s+)?(?:todo(?:\s+list)?|task\s+list|notes?|checklist)\b"),
         ("notes", "set reminder request", rf"{_PLEASE}set\s+(?:a\s+)?reminder\b"),
         ("notes", "assistant reminder request", rf"{_ACTION_QUESTION}set\s+(?:a\s+)?reminder\b"),
+        # "remember this note" / "save this note" phrasing doesn't use any of
+        # the imperative verbs above (add/create/make/take/jot/write down/
+        # set) — confirmed live: this fell through to plain chat with no
+        # tools offered at all, so the model narrated a false "saved!"
+        # confirmation with nothing actually written (see notes.md /
+        # priority-3 handoff). "remember"-framed requests without the word
+        # "note" fall through to the "memory" category below instead —
+        # manage_memory vs manage_notes is then the LLM's own tool-selection
+        # call once it has tools at all, per each tool's description.
+        ("notes", "remember/save note request", rf"{_PLEASE}(?:remember|save)\s+(?:this|that|it)\b.{{0,60}}\bnote\b"),
+
+        # Persistent facts/preferences about the USER ("remember this about
+        # me", "my name is X", "I prefer X", forget/preference requests).
+        # manage_memory is ALWAYS_AVAILABLE once a turn reaches agent mode
+        # (tool_index.ALWAYS_AVAILABLE — "memory is ambient"), so the only
+        # gap was ever this outer gate: a "remember this" turn that stayed
+        # in plain chat mode never got ANY tools, ambient or not. Confirmed
+        # live: classify_tool_intent returned needs_tools=False for this
+        # exact phrasing before this fix.
+        ("memory", "remember/save request", rf"{_PLEASE}(?:remember|save)\s+(?:this|that|it)\b.*"),
+        ("memory", "assistant remember request", rf"{_ACTION_QUESTION}remember\b.*"),
+        ("memory", "forget request", rf"{_PLEASE}forget\s+(?:this|that|it)\b.*"),
+        ("memory", "stated preference request", r"\bi\s+prefer\b|\bmy\s+preferences?\s+(?:is|are)\b"),
 
         # Email actions.
         ("email", "assistant email action request", rf"{_ACTION_QUESTION}(?:send|write|reply|email|message|archive|delete|mark)\b.{{0,120}}\b(?:emails?|mail|messages?|inbox|unread|read)\b"),

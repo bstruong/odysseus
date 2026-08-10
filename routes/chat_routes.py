@@ -1107,13 +1107,26 @@ def setup_chat_routes(
             # domains=['notes_calendar_tasks','web']), never for a pure lookup, so
             # keeping them available fixes multi-step chains without letting a
             # bare lookup drift. Only the genuine drift risks are stripped here.
-            disabled_tools.update({
+            _web_drift_strip = {
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",
                 "read_file", "write_file", "edit_file",
                 "send_email", "reply_to_email",
                 "api_call",
-            })
+            }
+            # _explicit_web_intent is a broad keyword match (today/current/
+            # latest/rate/...) that can false-positive on an ordinary word
+            # inside an unrelated message — e.g. "remember the codeword for
+            # today's test" is a save request, not a web lookup, but "today"
+            # alone used to strip manage_memory here, so the save silently
+            # failed and the model still narrated success (confirmed live
+            # against gemma4:12b-it-q4_K_M). When THIS SAME turn's own
+            # classify_tool_intent already identified genuine memory/notes
+            # save-intent, that takes precedence over the incidental
+            # web-flavored word — keep manage_memory available.
+            if _tool_intent and _tool_intent.category in ("memory", "notes"):
+                _web_drift_strip.discard("manage_memory")
+            disabled_tools.update(_web_drift_strip)
             disabled_tools.update(_BROWSER_MCP_TOOLS)
             if _search_enabled:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
