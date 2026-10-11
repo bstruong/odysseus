@@ -1,0 +1,75 @@
+# =============================================================================
+# workstation_ai / docker-compose.yml
+# 
+# General-Purpose Local AI Client Stack: AnythingLLM (Document RAG) + n8n
+# Acceleration Engine: llama-server on http://localhost:8080/v1 (100% VRAM)
+# Host Target: Intel Haswell Core i7-4790K + CachyOS Workstation
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Primary Document RAG Interface: AnythingLLM
+  # ---------------------------------------------------------------------------
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: anythingllm
+    restart: unless-stopped
+    # host network mode allows direct, zero-overhead connectivity to llama-server
+    # at http://127.0.0.1:8080/v1 and native LAN / Tailscale addresses.
+    network_mode: "host"
+    environment:
+      - SERVER_PORT=3001
+      - STORAGE_DIR=/app/server/storage
+      # Generic OpenAI integration pointing to local llama-server
+      - LLM_PROVIDER=openai
+      - OPEN_AI_BASE_PATH=http://127.0.0.1:8080/v1
+      - OPEN_AI_KEY=sk-local-workstation-token
+      - OPEN_MODEL_PREF=gemma4-qat-12b
+      # Built-in Private Vector Storage (LanceDB embedded)
+      - VECTOR_DB=lancedb
+      # Local Embedding Configuration
+      - EMBEDDING_ENGINE=openai
+      - EMBEDDING_BASE_PATH=http://127.0.0.1:8080/v1
+      - EMBEDDING_MODEL_PREF=qwen3-embed
+      - DISABLE_TELEMETRY=true
+    volumes:
+      - ./data/anythingllm:/app/server/storage:z
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3.5G
+
+  # ---------------------------------------------------------------------------
+  # On-Demand Batch Automations: n8n Workflow Automation
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n-automation
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    extra_hosts:
+      # Enables n8n bridge network to reach host llama-server on http://host.docker.internal:8080/v1
+      - "host.docker.internal:host-gateway"
+    environment:
+      - N8N_HOST=127.0.0.1
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://127.0.0.1:5678/
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      # Persistence & Security
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168
+      # OpenAI Node default endpoint inside container
+      - OPENAI_API_BASE=http://host.docker.internal:8080/v1
+      - OPENAI_API_KEY=sk-local-workstation-token
+    volumes:
+      - ./data/n8n:/home/node/.n8n:z
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2.0G

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "workstation_profile": {
+    "target_gpu": "AMD Radeon RX 7600 (8GB VRAM)",
+    "target_cpu": "Intel Haswell Core i7-4790K (4c/8t)",
+    "memory_policy": "ZERO_SPILLOVER_100_PERCENT_VRAM",
+    "engine_url": "http://127.0.0.1:8080/v1"
+  },
+  "anything_llm": {
+    "server": {
+      "port": 3001,
+      "host": "127.0.0.1"
+    },
+    "llm": {
+      "provider": "openai",
+      "base_url": "http://127.0.0.1:8080/v1",
+      "api_key": "sk-local-workstation-token",
+      "default_model": "gemma4-qat-12b",
+      "fallback_model": "qwen25-7b",
+      "vision_model": "gemma4-e4b-vision",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "context_window_limit": 16384
+    },
+    "vector_database": {
+      "provider": "lancedb",
+      "storage_path": "/app/server/storage/lancedb",
+      "similarity_metric": "cosine",
+      "top_k_results": 5,
+      "similarity_threshold": 0.25
+    },
+    "document_processing": {
+      "chunk_size_tokens": 512,
+      "chunk_overlap_tokens": 64,
+      "embedding_engine": "openai",
+      "embedding_base_url": "http://127.0.0.1:8080/v1",
+      "embedding_model": "qwen3-embed",
+      "source_attribution": {
+        "show_sources": true,
+        "enforce_citation_snippets": true
+      }
+    }
+  },
+  "pythagoras": {
+    "runtime": {
+      "execution_mode": "event_driven",
+      "heartbeat_loop_enabled": false,
+      "inactivity_sleep_seconds": 0
+    },
+    "channels": {
+      "telegram": {
+        "enabled": true,
+        "webhook_url": "http://127.0.0.1:8090/webhook/telegram",
+        "allowed_chat_ids": []
+      },
+      "discord": {
+        "enabled": false,
+        "webhook_url": "http://127.0.0.1:8090/webhook/discord"
+      }
+    },
+    "scheduled_automations": [
+      {
+        "id": "morning_briefing",
+        "cron": "0 8 * * *",
+        "task": "Synthesize unread emails, check calendar agenda, summarize weather and tasks",
+        "model": "gemma4-qat-12b"
+      },
+      {
+        "id": "evening_inbox_triage",
+        "cron": "0 18 * * 1-5",
+        "task": "Triage inbox, tag urgent correspondence, draft pending replies",
+        "model": "llama31-8b"
+      }
+    ],
+    "memory_system": {
+      "provider": "understory",
+      "storage_path": "/mnt/data/pythagoras/understory_memory",
+      "format": "hierarchical_markdown",
+      "max_recall_tokens": 1500,
+      "auto_consolidate_days": 7
+    },
+    "agent_guardrails": {
+      "max_tool_rounds": 6,
+      "scratchpad_bullet_cap": 5,
+      "spec_on_disk_required": false
+    }
+  },
+  "n8n_workflows": {
+    "engine_endpoint": "http://host.docker.internal:8080/v1",
+    "default_model": "gemma4-qat-12b",
+    "batch_execution_on_boot": true,
+    "email_triage_batch": {
+      "trigger": "catchup_on_boot_and_cron",
+      "cron_schedule": "*/15 * * * *",
+      "inprocess_loop": false
+    }
+  }
+}
